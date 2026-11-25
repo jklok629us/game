@@ -82,13 +82,20 @@
         </select>
       </label>
       <div id="hw-names" class="names"></div>
+      <label class="field">題目難度
+        <select id="hw-level">
+          <option value="easy" selected>輕鬆（日常名詞）</option>
+          <option value="standard">標準（加入抽象、情緒詞）</option>
+        </select>
+      </label>
       <label class="field">回合數
         <select id="hw-rounds"><option value="1">1 回合</option><option value="2" selected>2 回合</option></select>
       </label>
       <details class="howto">
         <summary>點樣玩？</summary>
         <ol>
-          <li>每人會收到一個<b>信封</b>，入面有 5 個題目。輪到你出題時，揀一個做<b>隱藏詞</b>。</li>
+          <li>每人會收到一個<b>信封</b>，入面有 5 個題目（2 易、2 中、1 難）。輪到你出題時，揀一個做<b>隱藏詞</b>。</li>
+          <li><b>輕鬆</b>難度只有日常名詞（動物、食物、物件…）；<b>標準</b>難度每個信封會有 1 個抽象或情緒詞（例如夢想、快樂），比較難估。</li>
           <li>出題者逐個講<b>提示詞</b>（要係名詞，人名、地名、品牌都得），畫面會顯示提示同隱藏詞有幾接近（0–100%）。</li>
           <li>提示<b>超過 95%</b> 就即刻停；出完 <b>10 個</b>都未到 95%，系統會送多一個提示。</li>
           <li>其他人秘密寫低答案，一齊公開。<b>估中得 1 分</b>，今題完結。</li>

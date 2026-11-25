@@ -13,7 +13,7 @@
   7. 輸出到 web/data/：
        vocab.json   詞表 + 別名 + 詞性
        vectors.bin  int8 向量矩陣（row-major，N x dim）
-       answers.json [[答案 index, 難度 0易/1中/2難], ...]
+       answers.json [[答案 index, 難度 0易/1中/2難, 抽象 0/1], ...]
 
 前端只需要做 cosine similarity，不需要伺服器或 GPU。
 
@@ -215,6 +215,8 @@ def main():
     src.add_argument("--w2v", help="word2vec 文字格式向量檔（可 .gz）")
     ap.add_argument("--jieba-dict", type=Path, default=None)
     ap.add_argument("--answers", type=Path, default=ROOT / "data" / "answers.txt")
+    ap.add_argument("--abstract", type=Path, default=ROOT / "data" / "abstract_answers.txt",
+                    help="抽象／情緒類答案清單（輕鬆難度唔會用）")
     ap.add_argument("--extra", type=Path, default=ROOT / "data" / "extra_words.txt",
                     help="額外加入詞庫的詞（例如專有名詞）")
     ap.add_argument("--out", type=Path, default=ROOT / "web" / "data")
@@ -311,17 +313,32 @@ def main():
     m = np.stack(mats).astype(np.float32)
     m /= np.linalg.norm(m, axis=1, keepdims=True)
 
-    # 扣除垃圾方向：用種子詞（六合彩、玄機…）的主成分做方向，將所有向量投影到其正交補空間
+    # 扣除垃圾方向：每組種子詞（賭博、成人網站…）各自取主成分做方向，
+    # 合併後正交化，再將所有向量投影到其正交補空間
     if args.spam_dims and args.spam_seeds.exists():
-        seeds = [vecs.get(t2s.convert(w)) for w in read_answers(args.spam_seeds)]
-        seeds = [x / np.linalg.norm(x) for x in seeds if x is not None and np.any(x)]
-        if len(seeds) > args.spam_dims:
-            mu = m.mean(axis=0, keepdims=True)
-            _, _, vt = np.linalg.svd(np.stack(seeds) - mu, full_matrices=False)
-            d = vt[: args.spam_dims]
+        groups, cur = [], None
+        for line in args.spam_seeds.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("## "):
+                cur = []
+                groups.append((line[3:], cur))
+            elif line and not line.startswith("#") and cur is not None:
+                cur.append(line)
+        mu = m.mean(axis=0, keepdims=True)
+        dirs = []
+        for name, ws in groups:
+            seeds = [vecs.get(t2s.convert(w)) for w in ws]
+            seeds = [x / np.linalg.norm(x) for x in seeds if x is not None and np.any(x)]
+            if len(seeds) > args.spam_dims:
+                _, _, vt = np.linalg.svd(np.stack(seeds) - mu, full_matrices=False)
+                dirs.append(vt[: args.spam_dims])
+                print(f"  垃圾方向「{name}」：種子詞 {len(seeds)} 個，扣除 {args.spam_dims} 個方向", file=sys.stderr)
+        if dirs:
+            d, _ = np.linalg.qr(np.concatenate(dirs).T)  # 正交化
+            d = d.T
             m = m - (m - mu) @ d.T @ d
             m /= np.linalg.norm(m, axis=1, keepdims=True)
-            print(f"  已扣除 {args.spam_dims} 個垃圾方向（種子詞 {len(seeds)} 個）", file=sys.stderr)
+
     if args.dim and args.dim < m.shape[1]:
         mean = m.mean(axis=0, keepdims=True)
         _, _, vt = np.linalg.svd(m - mean, full_matrices=False)
@@ -350,8 +367,16 @@ def main():
                    separators=(",", ":")),
         encoding="utf-8",
     )
-    (args.out / "answers.json").write_text(json.dumps([[i, t] for i, t in zip(answer_idx, tiers)]),
-                                           encoding="utf-8")
+    abstract = set(read_answers(args.abstract)) if args.abstract.exists() else set()
+    missing = abstract - {words[i] for i in answer_idx}
+    if missing:
+        print(f"  [警告] 抽象清單有詞唔喺答案入面：{'、'.join(sorted(missing))}", file=sys.stderr)
+    flags = [int(words[i] in abstract) for i in answer_idx]
+    (args.out / "answers.json").write_text(
+        json.dumps([[i, t, a] for i, t, a in zip(answer_idx, tiers, flags)]), encoding="utf-8")
+    conc = [t for t, a in zip(tiers, flags) if not a]
+    print(f"  具體名詞 {len(conc)} 個（易 {conc.count(0)}／中 {conc.count(1)}／難 {conc.count(2)}）、"
+          f"抽象詞 {sum(flags)} 個", file=sys.stderr)
 
     mb = os.path.getsize(args.out / "vectors.bin") / 1e6
     print(f"詞性：一般名詞 {pos.count('n')}、專有名詞 {pos.count('p')}、其他 {pos.count('o')}；額外詞 {n_extra}",

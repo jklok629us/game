@@ -27,6 +27,7 @@ const Engine = {
   vecs: null,
   answers: [],     // 答案 index
   tiers: new Map(),// 答案 index -> 難度 0/1/2
+  abstract: new Set(), // 抽象／情緒類答案（輕鬆難度唔會派）
   pos: "",         // 每個詞的詞性：n 一般名詞 / p 專有名詞 / o 其他
 
   async load(onProgress) {
@@ -39,7 +40,8 @@ const Engine = {
     this.aliases = vocab.aliases;
     this.dim = vocab.dim;
     this.answers = answers.map((a) => a[0]);
-    this.tiers = new Map(answers);
+    this.tiers = new Map(answers.map((a) => [a[0], a[1]]));
+    this.abstract = new Set(answers.filter((a) => a[2]).map((a) => a[0]));
     this.pos = vocab.pos || "";
     this.words.forEach((w, i) => this.index.set(w, i));
 
@@ -297,13 +299,26 @@ function renderNameInputs() {
 }
 $("hw-count").addEventListener("change", renderNameInputs);
 
-/** 派信封：每人 5 個一般名詞，難度組合人人一樣（2 易、2 中、1 難），全場不重複 */
-function dealEnvelopes(n) {
+/**
+ * 派信封：每人 5 個題目，難度組合人人一樣（2 易、2 中、1 難），全場不重複。
+ *  - 輕鬆（easy）：只派具體名詞
+ *  - 標準（standard）：「難」嗰格固定派 1 個抽象／情緒詞，其餘 4 格係具體名詞
+ */
+function dealEnvelopes(n, level) {
   const byTier = [[], [], []];
-  for (const [i, t] of Engine.tiers) byTier[t].push(i);
+  const abstract = [];
+  for (const [i, t] of Engine.tiers) {
+    if (Engine.abstract.has(i)) abstract.push(i);
+    else byTier[t].push(i);
+  }
   byTier.forEach(shuffle);
-  return Array.from({ length: n }, () => ENVELOPE.map((t) => byTier[t].pop()));
+  shuffle(abstract);
+  return Array.from({ length: n }, () => ENVELOPE.map((t) =>
+    t === 2 && level === "standard" && abstract.length ? abstract.pop() : byTier[t].pop()));
 }
+
+/** 顯示用難度：標準模式下抽象詞一律當「難」 */
+const tierOf = (idx) => (Engine.abstract.has(idx) ? 2 : Engine.tiers.get(idx));
 
 $("hw-start").addEventListener("click", () => {
   const names = [...$("hw-names").querySelectorAll("input")].map((i, k) => i.value.trim() || `玩家 ${k + 1}`);
@@ -315,7 +330,8 @@ $("hw-start").addEventListener("click", () => {
   HW = {
     names, rounds, turns, turn: -1,
     scores: names.map(() => 0),
-    envelopes: dealEnvelopes(names.length),
+    level: $("hw-level").value,
+    envelopes: dealEnvelopes(names.length, $("hw-level").value),
     used: names.map(() => new Set()),
   };
   nextTurn();
@@ -352,7 +368,7 @@ function renderEnvelope(animate = false) {
   const s = HW.cur.setter;
   const cards = HW.envelopes[s].map((idx, k) => {
     const used = HW.used[s].has(idx);
-    const t = Engine.tiers.get(idx);
+    const t = tierOf(idx);
     const b = el("button", `card t${t}`);
     b.type = "button";
     b.disabled = used;
@@ -530,7 +546,7 @@ function revealGuesses() {
     msg = `無人估中！出題者 ${HW.names[c.setter]} 得 ${pts} 分。`;
   }
   const over = winners.length > 0 || c.phase >= MAX_PHASES;
-  if (over) msg += `\n隱藏詞係「${Engine.words[c.topic.target]}」（難度：${TIER_NAME[Engine.tiers.get(c.topic.target)]}）。`;
+  if (over) msg += `\n隱藏詞係「${Engine.words[c.topic.target]}」（難度：${TIER_NAME[tierOf(c.topic.target)]}）。`;
   $("hw-reveal-msg").textContent = msg;
 
   const near = $("hw-reveal-near");
