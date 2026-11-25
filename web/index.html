@@ -11,7 +11,7 @@
 <body>
   <header class="top">
     <h1>猜詞<span>作戰</span></h1>
-    <p class="tag">AI 語意聯想猜詞遊戲 · 越接近答案，相似度越高</p>
+    <p class="tag">AI 語意相關度 · 0% 毫無關係 → 100% 就是答案</p>
   </header>
 
   <main id="app">
@@ -24,82 +24,163 @@
     <section id="menu" class="panel hidden">
       <h2>選擇模式</h2>
       <div class="modes">
-        <button class="mode" data-mode="daily">
-          <b>每日一題</b><small>所有人同一個答案</small>
+        <button class="mode" data-go="sb-setup">
+          <b>測試模式</b><small>揀一個題目，輸入任何詞，睇吓同題目相關度有幾高</small>
         </button>
-        <button class="mode" data-mode="random">
-          <b>隨機練習</b><small>隨機抽一題</small>
-        </button>
-        <button class="mode" data-mode="versus">
-          <b>雙人搶答</b><small>同一題輪流猜，猜中者勝；你的線索對手也看得到</small>
-        </button>
-        <button class="mode" data-mode="duel">
-          <b>出題對決</b><small>互相出題，用最少次數猜中者勝</small>
+        <button class="mode" data-go="hw-setup">
+          <b>隱藏詞對戰</b><small>多人輪流出題：出題者俾提示詞，其他人估隱藏詞</small>
         </button>
       </div>
       <details class="howto">
-        <summary>玩法說明</summary>
+        <summary>相關度點計？</summary>
         <ul>
-          <li>輸入任何中文詞（繁簡皆可），AI 會計算它和答案的<b>語意相似度</b>。</li>
-          <li>相似度來自詞向量：意思越接近、越常在同一語境出現的詞，分數越高。</li>
-          <li>如果你的詞是答案最接近的 1000 個詞之一，會顯示<b>排名</b>（第 1 名最接近）。</li>
-          <li>答案的相似度是 100。「提示」會揭露一個比你目前最佳更接近的詞。</li>
+          <li>AI 將每個詞轉成「語意向量」，再比較兩個詞有幾接近。</li>
+          <li>相關度按「呢個詞喺 3 萬個詞入面，排第幾接近題目」換算成 0–100%。</li>
+          <li><b>100%</b> = 就是題目本身；<b>95% 以上</b> = 極度接近（約最接近的十幾個詞）；
+            <b>90%</b> ≈ 頭 100 名；<b>80%</b> ≈ 頭 1000 名。</li>
+          <li>意思相近（近義詞、反義詞、同類事物）通常會比「經常一齊出現」的詞分數更高。</li>
         </ul>
       </details>
     </section>
 
-    <!-- 出題（出題對決用） -->
-    <section id="setter" class="panel hidden">
-      <h2 id="setter-title">玩家 1 出題</h2>
-      <p class="muted">對手請轉身！輸入一個詞作答案（必須在詞庫內）。</p>
-      <form id="setter-form" class="row">
-        <input id="setter-input" type="password" autocomplete="off" placeholder="秘密答案">
-        <button type="submit">確定</button>
+    <!-- ========== 測試模式 ========== -->
+    <section id="sb-setup" class="panel hidden">
+      <div class="game-head">
+        <h2>測試模式 · 設定題目</h2>
+        <button class="ghost" data-go="menu">返回</button>
+      </div>
+      <form id="sb-form">
+        <div class="row">
+          <input id="sb-topic" autocomplete="off" placeholder="輸入題目詞，例如：醫生">
+          <button type="button" id="sb-random" class="ghost">隨機</button>
+        </div>
+        <label class="check"><input type="checkbox" id="sb-hide"> 隱藏題目（俾其他人測試／估）</label>
+        <p id="sb-setup-msg" class="msg"></p>
+        <button type="submit">開始測試</button>
       </form>
-      <p id="setter-msg" class="msg"></p>
     </section>
 
-    <!-- 遊戲畫面 -->
-    <section id="game" class="panel hidden">
+    <section id="sb-play" class="panel hidden">
       <div class="game-head">
         <div>
-          <h2 id="game-title">每日一題</h2>
-          <p id="game-sub" class="muted"></p>
+          <h2>測試模式</h2>
+          <p class="muted">題目：<b id="sb-topic-label"></b>
+            <button id="sb-reveal" class="link hidden">顯示</button></p>
         </div>
-        <button id="btn-menu" class="ghost">返回選單</button>
+        <button class="ghost" data-go="sb-setup">換題目</button>
       </div>
-
-      <div id="turn" class="turn hidden"></div>
-
-      <form id="guess-form" class="row">
-        <input id="guess-input" autocomplete="off" placeholder="輸入一個詞…" enterkeyhint="go">
-        <button type="submit">猜</button>
+      <form id="sb-test" class="row">
+        <input id="sb-word" autocomplete="off" placeholder="輸入一個詞測試相關度…" enterkeyhint="go">
+        <button type="submit">測試</button>
       </form>
-      <p id="msg" class="msg"></p>
-
-      <div id="last" class="last hidden"></div>
-
+      <p id="sb-msg" class="msg"></p>
+      <div id="sb-last"></div>
+      <ul id="sb-list" class="scores"></ul>
       <div class="actions">
-        <button id="btn-hint" class="ghost">提示</button>
-        <button id="btn-giveup" class="ghost danger">放棄</button>
-        <span id="stats" class="muted"></span>
+        <button id="sb-nearest" class="ghost">顯示最接近的 10 個詞</button>
+        <button id="sb-clear" class="ghost">清除紀錄</button>
       </div>
-
-      <table class="guesses">
-        <thead><tr><th>#</th><th>詞</th><th>相似度</th><th>排名</th></tr></thead>
-        <tbody id="guess-list"></tbody>
-      </table>
+      <ol id="sb-near" class="nearest hidden"></ol>
     </section>
 
-    <!-- 結果 -->
-    <section id="result" class="panel hidden">
-      <h2 id="result-title"></h2>
-      <p id="result-body"></p>
-      <h3>最接近答案的詞</h3>
-      <ol id="nearest" class="nearest"></ol>
+    <!-- ========== 隱藏詞對戰 ========== -->
+    <section id="hw-setup" class="panel hidden">
+      <div class="game-head">
+        <h2>隱藏詞對戰 · 設定</h2>
+        <button class="ghost" data-go="menu">返回</button>
+      </div>
+      <label class="field">玩家人數
+        <select id="hw-count">
+          <option>2</option><option selected>3</option><option>4</option><option>5</option><option>6</option>
+        </select>
+      </label>
+      <div id="hw-names" class="names"></div>
+      <label class="field">回合數（每回合每人出題一次）
+        <select id="hw-rounds"><option value="1">1 回合</option><option value="2" selected>2 回合</option></select>
+      </label>
+      <details class="howto" open>
+        <summary>規則</summary>
+        <ol>
+          <li>出題次序隨機。出題者秘密揀一個<b>隱藏詞</b>。</li>
+          <li><b>提示階段</b>：出題者逐個公開提示詞，AI 即時顯示每個提示同隱藏詞的相關度。
+            每階段最多 <b>10 個</b>提示；提示不可以包含隱藏詞的字。</li>
+          <li>一旦有提示達到 <b>95% 或以上</b>，提示<b>即時停止</b>，進入作答。出題者亦可提早停止。</li>
+          <li><b>作答階段</b>：其他玩家輪流秘密寫下答案，然後同時公開。</li>
+          <li>最多 <b>3 個階段</b>。越早估中分越高：第 1 階段 3 分、第 2 階段 2 分、第 3 階段 1 分。
+            出題者每有一人估中得 1 分。</li>
+          <li>所有回合完結後，總分最高者勝。</li>
+        </ol>
+      </details>
+      <button id="hw-start">開始遊戲</button>
+    </section>
+
+    <section id="hw-secret" class="panel hidden">
+      <p class="muted" id="hw-secret-round"></p>
+      <h2 id="hw-secret-title"></h2>
+      <p class="muted">其他玩家請轉身！揀一個隱藏詞（必須在詞庫內）。</p>
+      <form id="hw-secret-form">
+        <div class="row">
+          <input id="hw-secret-input" type="password" autocomplete="off" placeholder="隱藏詞">
+          <button type="button" id="hw-secret-random" class="ghost">隨機</button>
+        </div>
+        <label class="check"><input type="checkbox" id="hw-secret-show"> 顯示我輸入的字</label>
+        <p id="hw-secret-msg" class="msg"></p>
+        <button type="submit">確定</button>
+      </form>
+    </section>
+
+    <section id="hw-hint" class="panel hidden">
+      <div class="game-head">
+        <div>
+          <h2 id="hw-hint-title"></h2>
+          <p class="muted" id="hw-hint-sub"></p>
+        </div>
+        <span id="hw-hint-count" class="pill"></span>
+      </div>
+      <form id="hw-hint-form" class="row">
+        <input id="hw-hint-input" autocomplete="off" placeholder="出題者輸入提示詞…" enterkeyhint="go">
+        <button type="submit">公開</button>
+      </form>
+      <p id="hw-hint-msg" class="msg"></p>
+      <ul id="hw-hints" class="scores"></ul>
+      <div class="actions">
+        <button id="hw-to-guess">停止提示，開始作答</button>
+      </div>
+      <div class="board" id="hw-board-hint"></div>
+    </section>
+
+    <section id="hw-guess" class="panel hidden">
+      <h2 id="hw-guess-title"></h2>
+      <p class="muted">其他人唔好睇！寫低你估的隱藏詞。</p>
+      <ul id="hw-guess-hints" class="scores compact"></ul>
+      <form id="hw-guess-form">
+        <div class="row">
+          <input id="hw-guess-input" type="password" autocomplete="off" placeholder="你的答案">
+          <button type="submit">提交</button>
+        </div>
+        <label class="check"><input type="checkbox" id="hw-guess-show"> 顯示我輸入的字</label>
+        <p id="hw-guess-msg" class="msg"></p>
+      </form>
+    </section>
+
+    <section id="hw-reveal" class="panel hidden">
+      <h2 id="hw-reveal-title"></h2>
+      <table class="reveal">
+        <thead><tr><th>玩家</th><th>答案</th><th>相關度</th></tr></thead>
+        <tbody id="hw-reveal-list"></tbody>
+      </table>
+      <p id="hw-reveal-msg" class="msg"></p>
+      <ol id="hw-reveal-near" class="nearest hidden"></ol>
+      <button id="hw-reveal-next"></button>
+      <div class="board" id="hw-board-reveal"></div>
+    </section>
+
+    <section id="hw-final" class="panel hidden">
+      <h2 id="hw-final-title"></h2>
+      <div class="board" id="hw-board-final"></div>
       <div class="row">
-        <button id="btn-next">繼續</button>
-        <button id="btn-result-menu" class="ghost">返回選單</button>
+        <button data-go="hw-setup">再玩一局</button>
+        <button class="ghost" data-go="menu">返回選單</button>
       </div>
     </section>
   </main>

@@ -2,13 +2,16 @@
 
 /* =========================================================
  * 猜詞作戰 — 前端
- *  - 載入 int8 詞向量，在瀏覽器計算 cosine similarity
- *  - 遊戲模式：每日一題 / 隨機練習 / 雙人搶答 / 出題對決
+ *  - 載入 int8 詞向量，在瀏覽器計算語意相似度
+ *  - 相關度：按「在詞庫中排第幾接近」換算成 0–100%
+ *  - 模式：測試模式 / 隱藏詞對戰（參考《魔鬼的詭計：死亡重啟》第 5 日主賽「히든 워드」）
  * ========================================================= */
 
-const TOP_N = 1000;          // 顯示排名的範圍
-const DUEL_HINT_PENALTY = 3; // 出題對決：每次提示加幾次猜測
-const DAY0 = Date.UTC(2026, 0, 1);
+const STOP_PCT = 95;            // 提示達到此相關度即停止提示
+const MAX_HINTS = 10;           // 每階段最多提示數
+const MAX_PHASES = 3;           // 最多幾個提示／作答階段
+const PHASE_POINTS = [3, 2, 1]; // 第 n 階段估中的分數
+const SETTER_POINT = 1;         // 出題者：每有一人估中得分
 
 // ---------------- 語意引擎 ----------------
 const Engine = {
@@ -16,7 +19,7 @@ const Engine = {
   index: new Map(),
   aliases: {},
   dim: 0,
-  vecs: null,     // Float32Array，已正規化
+  vecs: null,
   answers: [],
 
   async load(onProgress) {
@@ -33,6 +36,7 @@ const Engine = {
 
     const q = new Int8Array(raw);
     const n = this.words.length, d = this.dim;
+    if (q.length !== n * d) throw new Error("詞向量檔案大小不符");
     const v = new Float32Array(n * d);
     for (let i = 0; i < n; i++) {
       let s = 0;
@@ -52,8 +56,8 @@ const Engine = {
     return -1;
   },
 
-  /** 為一個答案預先計算所有詞的相似度及排名 */
-  puzzle(target) {
+  /** 為一個題目預先計算所有詞的排名 */
+  topic(target) {
     const n = this.words.length, d = this.dim, v = this.vecs;
     const sims = new Float32Array(n);
     const t = target * d;
@@ -63,21 +67,40 @@ const Engine = {
       for (let k = 0; k < d; k++) s += v[o + k] * v[t + k];
       sims[i] = s;
     }
-    sims[target] = 1;
+    sims[target] = 2;
     const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => sims[b] - sims[a]);
     const rank = new Int32Array(n);
-    order.forEach((idx, r) => (rank[idx] = r)); // 答案 = 0，最接近 = 1
-    return { target, sims, order, rank };
+    order.forEach((idx, r) => (rank[idx] = r)); // 題目本身 = 0，最接近 = 1
+    return { target, order, rank, pct: (i) => pctFromRank(rank[i]) };
   },
 };
+
+/**
+ * 排名 → 相關度百分比。
+ * 用 log10(排名) 做分段線性插值：
+ *   第 1 名 99%、第 10 名 96%、第 100 名 90%、第 1000 名 78%、
+ *   第 5000 名 55%、第 15000 名 25%、第 30000 名 0%。
+ * 約最接近的 13 個詞會 ≥ 95%（節目中例如「樹／樹根」96.5%）。
+ */
+const PCT_ANCHORS = [[0, 99], [1, 96], [2, 90], [3, 78], [3.7, 55], [4.18, 25], [4.48, 0]];
+function pctFromRank(r) {
+  if (r === 0) return 100;
+  const x = Math.log10(r);
+  for (let i = 1; i < PCT_ANCHORS.length; i++) {
+    const [x0, y0] = PCT_ANCHORS[i - 1], [x1, y1] = PCT_ANCHORS[i];
+    if (x <= x1) return Math.max(0, y0 + ((x - x0) / (x1 - x0)) * (y1 - y0));
+  }
+  return 0;
+}
+const fmtPct = (p) => (p >= 100 ? "100%" : `${(Math.floor(p * 10) / 10).toFixed(1)}%`);
 
 async function fetchWithProgress(url, onProgress) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url}: ${res.status}`);
   const total = Number(res.headers.get("content-length")) || 0;
   if (!res.body || !total) return res.arrayBuffer();
-  // 注意：伺服器可能用 gzip 傳送（例如 GitHub Pages），content-length 是壓縮後大小，
-  // 而讀到的是解壓後資料，所以不能用 content-length 預先分配緩衝區。
+  // 伺服器可能用 gzip 傳送（例如 GitHub Pages），content-length 是壓縮後大小，
+  // 所以不能用它預先分配緩衝區。
   const reader = res.body.getReader();
   const chunks = [];
   let got = 0;
@@ -96,313 +119,369 @@ async function fetchWithProgress(url, onProgress) {
 
 // ---------------- 工具 ----------------
 const $ = (id) => document.getElementById(id);
-const show = (id) => {
+function show(id) {
   for (const s of document.querySelectorAll("main > section")) s.classList.toggle("hidden", s.id !== id);
-};
+  const input = document.querySelector(`#${id} input:not([type=checkbox])`);
+  if (input) setTimeout(() => input.focus(), 50);
+  window.scrollTo(0, 0);
+}
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
   if (text != null) e.textContent = text;
   return e;
 }
-function mulberry32(a) {
-  return () => {
-    a |= 0; a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+function heat(p) {
+  if (p >= 100) return "win";
+  if (p >= STOP_PCT) return "hot";
+  if (p >= 90) return "warm";
+  if (p >= 78) return "near";
+  return "cold";
 }
-/** 固定種子洗牌，令每日題目順序不按分類排列 */
-function dailyOrder() {
-  const a = Engine.answers.slice();
-  const rnd = mulberry32(20260101);
+/** 一行「詞 + 相關度條」 */
+function scoreItem(word, p, extra) {
+  const li = el("li", heat(p));
+  const top = el("div", "line");
+  top.append(el("span", "w", word));
+  if (extra) top.append(el("span", "tag", extra));
+  top.append(el("span", "p", fmtPct(p)));
+  const bar = el("div", "meter");
+  const fill = el("div");
+  fill.style.width = `${p}%`;
+  bar.append(fill);
+  li.append(top, bar);
+  return li;
+}
+const randomAnswer = () => Engine.answers[Math.floor(Math.random() * Engine.answers.length)];
+function shuffle(a) {
   for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(rnd() * (i + 1));
+    const j = Math.floor(Math.random() * (i + 1));
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
 }
-function todayNumber() {
-  const now = new Date();
-  return Math.floor((Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) - DAY0) / 86400000);
+function bindReveal(checkbox, input) {
+  checkbox.addEventListener("change", () => (input.type = checkbox.checked ? "text" : "password"));
 }
-function heat(rank) {
-  if (rank === 0) return "win";
-  if (rank <= 10) return "hot";
-  if (rank <= 100) return "warm";
-  if (rank <= TOP_N) return "near";
-  return "cold";
-}
-const store = {
-  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* 無痕模式等 */ } },
-};
 
-// ---------------- 遊戲狀態 ----------------
-let game = null;   // 目前這一局
-let duel = null;   // 出題對決的整體進度
+// =========================================================
+// 測試模式
+// =========================================================
+const SB = { topic: null, tested: [] };
 
-function newGame({ mode, target, title, sub, players, saveKey }) {
-  game = {
-    mode, title, sub, saveKey,
-    puzzle: Engine.puzzle(target),
-    players: players.map((name) => ({ name, guesses: 0, hints: 0 })),
-    current: 0,
-    list: [],            // {idx, player, n, hint}
-    guessed: new Set(),
-    over: false,
-    winner: -1,
-  };
-  if (saveKey) {
-    const saved = store.get(saveKey);
-    if (saved && saved.target === target) {
-      for (const g of saved.list) addGuess(g.idx, g.player, g.hint, true);
-      if (saved.over) game.over = true;
-    }
+$("sb-random").addEventListener("click", () => {
+  $("sb-topic").value = Engine.words[randomAnswer()];
+});
+$("sb-hide").addEventListener("change", () => ($("sb-topic").type = $("sb-hide").checked ? "password" : "text"));
+
+$("sb-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const idx = Engine.lookup($("sb-topic").value);
+  if (idx < 0) {
+    $("sb-setup-msg").textContent = "呢個詞唔喺詞庫入面，試另一個（或者撳「隨機」）。";
+    return;
   }
-  renderGame();
-  show("game");
-  if (game.over) finish(false);
-  else $("guess-input").focus();
-}
+  $("sb-setup-msg").textContent = "";
+  SB.topic = Engine.topic(idx);
+  SB.tested = [];
+  SB.hidden = $("sb-hide").checked;
+  renderSandbox();
+  show("sb-play");
+});
 
-function save() {
-  if (!game.saveKey) return;
-  store.set(game.saveKey, {
-    target: game.puzzle.target,
-    list: game.list.map(({ idx, player, hint }) => ({ idx, player, hint })),
-    over: game.over,
-  });
-}
-
-function addGuess(idx, player, hint = false, silent = false) {
-  const p = game.players[player];
-  if (hint) p.hints++;
-  else p.guesses++;
-  const entry = { idx, player, hint, n: game.list.length + 1 };
-  game.list.push(entry);
-  game.guessed.add(idx);
-  if (!hint && idx === game.puzzle.target) {
-    game.over = true;
-    game.winner = player;
+function renderSandbox(latest) {
+  const word = Engine.words[SB.topic.target];
+  $("sb-topic-label").textContent = SB.hidden ? "●●●（已隱藏）" : word;
+  $("sb-reveal").classList.toggle("hidden", !SB.hidden);
+  $("sb-last").replaceChildren();
+  if (latest != null) {
+    const ul = el("ul", "scores latest");
+    ul.append(scoreItem(Engine.words[latest], SB.topic.pct(latest), "最新"));
+    $("sb-last").append(ul);
   }
-  if (!silent) {
-    // 雙人搶答：猜完（或用提示）換人
-    if (game.mode === "versus" && !game.over) game.current = 1 - game.current;
-    save();
-  }
-  return entry;
+  const sorted = SB.tested.slice().sort((a, b) => SB.topic.rank[a] - SB.topic.rank[b]);
+  $("sb-list").replaceChildren(...sorted.map((i) => scoreItem(Engine.words[i], SB.topic.pct(i))));
+  $("sb-near").classList.add("hidden");
+  $("sb-word").value = "";
 }
 
-function submitGuess(raw) {
-  if (!game || game.over) return;
-  const msg = $("msg");
+$("sb-test").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const raw = $("sb-word").value;
   const idx = Engine.lookup(raw);
   if (idx < 0) {
-    msg.textContent = `「${raw.trim()}」不在詞庫內，試另一個詞。`;
+    $("sb-msg").textContent = raw.trim() ? `「${raw.trim()}」唔喺詞庫入面。` : "";
     return;
   }
-  if (game.guessed.has(idx)) {
-    msg.textContent = `「${Engine.words[idx]}」已經猜過了。`;
-    return;
-  }
-  msg.textContent = "";
-  const entry = addGuess(idx, game.current);
-  renderGame(entry);
-  if (game.over) setTimeout(() => finish(true), 600);
-}
-
-function useHint() {
-  if (!game || game.over) return;
-  const pz = game.puzzle;
-  let best = Infinity;
-  for (const g of game.list) best = Math.min(best, pz.rank[g.idx]);
-  let r = best <= TOP_N ? Math.floor(best / 2) : 500;
-  while (r >= 1 && game.guessed.has(pz.order[r])) r--;
-  if (r < 1) {
-    $("msg").textContent = "已經沒有更接近的提示了！";
-    return;
-  }
-  const entry = addGuess(pz.order[r], game.current, true);
-  $("msg").textContent = `提示：「${Engine.words[entry.idx]}」排第 ${r} 名。`;
-  renderGame(entry);
-}
-
-function giveUp() {
-  if (!game || game.over) return;
-  if (!confirm("確定放棄？會直接公佈答案。")) return;
-  game.over = true;
-  game.winner = -1;
-  save();
-  finish(true);
-}
-
-// ---------------- 畫面 ----------------
-function guessRow(g) {
-  const pz = game.puzzle;
-  const rank = pz.rank[g.idx];
-  const tr = el("tr", heat(rank));
-  if (g.hint) tr.classList.add("hint");
-  tr.append(el("td", "n", g.hint ? "💡" : String(g.n)));
-  const wordTd = el("td", "w");
-  if (game.players.length > 1 && game.mode === "versus") wordTd.append(el("span", `dot p${g.player}`));
-  wordTd.append(document.createTextNode(Engine.words[g.idx]));
-  tr.append(wordTd);
-  tr.append(el("td", "s", (pz.sims[g.idx] * 100).toFixed(2)));
-  const rt = el("td", "r");
-  if (rank === 0) rt.textContent = "🎯 答案";
-  else if (rank <= TOP_N) {
-    const bar = el("div", "meter");
-    const fill = el("div");
-    fill.style.width = `${((TOP_N - rank + 1) / TOP_N) * 100}%`;
-    bar.append(fill);
-    rt.append(el("span", null, `第 ${rank} 名`), bar);
-  } else rt.textContent = "冷";
-  tr.append(rt);
-  return tr;
-}
-
-function renderGame(latest) {
-  $("game-title").textContent = game.title;
-  $("game-sub").textContent = game.sub || "";
-
-  const turn = $("turn");
-  if (game.mode === "versus") {
-    turn.classList.remove("hidden");
-    turn.className = `turn p${game.current}`;
-    turn.textContent = game.over ? "" : `輪到 ${game.players[game.current].name}`;
-  } else turn.classList.add("hidden");
-
-  const last = $("last");
-  if (latest) {
-    last.classList.remove("hidden");
-    last.replaceChildren(el("table", "guesses"));
-    last.firstChild.append(guessRow(latest));
-  } else last.classList.add("hidden");
-
-  const body = $("guess-list");
-  const sorted = game.list.slice().sort((a, b) => game.puzzle.sims[b.idx] - game.puzzle.sims[a.idx]);
-  body.replaceChildren(...sorted.map(guessRow));
-
-  const p = game.players[game.current];
-  $("stats").textContent = game.mode === "versus"
-    ? game.players.map((x) => `${x.name}：${x.guesses} 次`).join(" · ")
-    : `已猜 ${p.guesses} 次${p.hints ? `，提示 ${p.hints} 次` : ""}`;
-
-  const canHint = !(game.mode === "versus" && game.players[game.current].hints >= 1);
-  $("btn-hint").disabled = game.over || !canHint;
-  $("btn-hint").textContent = game.mode === "versus" ? "提示（每人一次，會用掉回合）"
-    : game.mode === "duel" ? `提示（+${DUEL_HINT_PENALTY} 次）` : "提示";
-  $("guess-input").disabled = game.over;
-  $("guess-input").value = "";
-}
-
-function finish() {
-  const pz = game.puzzle;
-  const answer = Engine.words[pz.target];
-  const p = game.players[0];
-  let title, body;
-  if (game.mode === "versus") {
-    title = game.winner >= 0 ? `🏆 ${game.players[game.winner].name} 勝出！` : "無人猜中";
-    body = `答案是「${answer}」。共猜了 ${game.list.filter((g) => !g.hint).length} 次。`;
-  } else if (game.mode === "duel") {
-    const score = game.winner >= 0 ? p.guesses + p.hints * DUEL_HINT_PENALTY : null;
-    duel.scores[duel.round] = score;
-    title = score != null ? `${p.name} 猜中了！` : `${p.name} 放棄了`;
-    body = `答案是「${answer}」。` + (score != null ? `成績：${score} 次（含提示罰分）。` : "此回合當作落敗。");
-    if (duel.round === 1) {
-      const [a, b] = duel.scores; // a = 玩家 2 解題成績, b = 玩家 1 解題成績
-      const verdict = a == null && b == null ? "雙方都放棄，平手！"
-        : a == null ? "🏆 玩家 1 勝出！" : b == null ? "🏆 玩家 2 勝出！"
-        : a === b ? "平手！" : a < b ? "🏆 玩家 2 勝出！" : "🏆 玩家 1 勝出！";
-      body += `\n\n最終：玩家 2 用了 ${a ?? "—"} 次，玩家 1 用了 ${b ?? "—"} 次。${verdict}`;
-    }
-  } else {
-    title = game.winner >= 0 ? "🎉 猜中了！" : "下次再來";
-    body = `答案是「${answer}」。` + (game.winner >= 0 ? `你用了 ${p.guesses} 次猜中${p.hints ? `（提示 ${p.hints} 次）` : ""}。` : "");
-  }
-  $("result-title").textContent = title;
-  $("result-body").textContent = body;
-  $("nearest").replaceChildren(
-    ...pz.order.slice(1, 21).map((i) => el("li", null, `${Engine.words[i]}（${(pz.sims[i] * 100).toFixed(1)}）`)),
+  $("sb-msg").textContent = idx === SB.topic.target ? "🎯 100%！就係題目本身。" : "";
+  if (!SB.tested.includes(idx)) SB.tested.push(idx);
+  if (idx === SB.topic.target) SB.hidden = false;
+  renderSandbox(idx);
+  $("sb-word").focus();
+});
+$("sb-reveal").addEventListener("click", () => {
+  SB.hidden = false;
+  renderSandbox();
+});
+$("sb-clear").addEventListener("click", () => {
+  SB.tested = [];
+  renderSandbox();
+});
+$("sb-nearest").addEventListener("click", () => {
+  const ol = $("sb-near");
+  ol.replaceChildren(
+    ...SB.topic.order.slice(1, 11).map((i) => el("li", null, `${Engine.words[i]}　${fmtPct(SB.topic.pct(i))}`)),
   );
-  $("btn-next").textContent = game.mode === "duel" && duel.round === 0 ? "下一回合：交換出題" : "再玩一局";
-  $("btn-next").classList.toggle("hidden", game.mode === "daily");
-  show("result");
+  ol.classList.toggle("hidden");
+});
+
+// =========================================================
+// 隱藏詞對戰
+// =========================================================
+let HW = null;
+
+function renderNameInputs() {
+  const n = Number($("hw-count").value);
+  const box = $("hw-names");
+  const old = [...box.querySelectorAll("input")].map((i) => i.value);
+  box.replaceChildren();
+  for (let i = 0; i < n; i++) {
+    const input = el("input");
+    input.placeholder = `玩家 ${i + 1}`;
+    input.value = old[i] || "";
+    input.maxLength = 10;
+    box.append(input);
+  }
+}
+$("hw-count").addEventListener("change", renderNameInputs);
+
+$("hw-start").addEventListener("click", () => {
+  const names = [...$("hw-names").querySelectorAll("input")].map((i, k) => i.value.trim() || `玩家 ${k + 1}`);
+  const rounds = Number($("hw-rounds").value);
+  const turns = [];
+  for (let r = 0; r < rounds; r++) {
+    for (const s of shuffle(names.map((_, i) => i))) turns.push({ round: r, setter: s });
+  }
+  HW = { names, scores: names.map(() => 0), turns, turn: -1, rounds };
+  nextTurn();
+});
+
+function nextTurn() {
+  HW.turn++;
+  if (HW.turn >= HW.turns.length) return finalScreen();
+  const { round, setter } = HW.turns[HW.turn];
+  HW.cur = {
+    setter,
+    topic: null,
+    phase: 0,
+    hints: [],        // {idx, phase}
+    phaseHints: 0,
+    solved: new Map(), // player -> phase
+    guessers: [],
+    guessQueue: [],
+    guesses: new Map(),
+  };
+  $("hw-secret-round").textContent = `第 ${round + 1} / ${HW.rounds} 回合 · 第 ${HW.turn + 1} / ${HW.turns.length} 題`;
+  $("hw-secret-title").textContent = `${HW.names[setter]} 出題`;
+  $("hw-secret-input").value = "";
+  $("hw-secret-input").type = "password";
+  $("hw-secret-show").checked = false;
+  $("hw-secret-msg").textContent = "";
+  show("hw-secret");
 }
 
-// ---------------- 模式 ----------------
-function randomAnswer() {
-  return Engine.answers[Math.floor(Math.random() * Engine.answers.length)];
-}
-
-const Modes = {
-  daily() {
-    const day = todayNumber();
-    const order = dailyOrder();
-    const target = order[((day % order.length) + order.length) % order.length];
-    newGame({
-      mode: "daily", target, players: ["你"],
-      title: `每日一題 #${day + 1}`, sub: "今日所有人的答案都一樣", saveKey: `daily-${day}`,
-    });
-  },
-  random() {
-    newGame({ mode: "random", target: randomAnswer(), players: ["你"], title: "隨機練習", sub: "" });
-  },
-  versus() {
-    newGame({
-      mode: "versus", target: randomAnswer(), players: ["玩家 1", "玩家 2"],
-      title: "雙人搶答", sub: "輪流猜同一題，先猜中者勝。小心——你的好線索，對手也看得到。",
-    });
-  },
-  duel() {
-    duel = { round: 0, scores: [null, null] };
-    startSetter();
-  },
-};
-
-function startSetter() {
-  const setter = duel.round === 0 ? 1 : 2;
-  $("setter-title").textContent = `玩家 ${setter} 出題`;
-  $("setter-msg").textContent = "";
-  $("setter-input").value = "";
-  show("setter");
-  $("setter-input").focus();
-}
-
-$("setter-form").addEventListener("submit", (e) => {
+bindReveal($("hw-secret-show"), $("hw-secret-input"));
+$("hw-secret-random").addEventListener("click", () => {
+  $("hw-secret-input").value = Engine.words[randomAnswer()];
+  $("hw-secret-show").checked = true;
+  $("hw-secret-input").type = "text";
+});
+$("hw-secret-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  const idx = Engine.lookup($("setter-input").value);
+  const idx = Engine.lookup($("hw-secret-input").value);
   if (idx < 0) {
-    $("setter-msg").textContent = "這個詞不在詞庫內，換一個吧。";
+    $("hw-secret-msg").textContent = "呢個詞唔喺詞庫入面，換一個吧。";
     return;
   }
-  const solver = duel.round === 0 ? 2 : 1;
-  newGame({
-    mode: "duel", target: idx, players: [`玩家 ${solver}`],
-    title: `出題對決 · 第 ${duel.round + 1} 回合`, sub: `玩家 ${solver} 解題（提示每次 +${DUEL_HINT_PENALTY} 次）`,
-  });
+  HW.cur.topic = Engine.topic(idx);
+  startHintPhase();
 });
 
-// ---------------- 事件 ----------------
-for (const b of document.querySelectorAll("[data-mode]")) {
-  b.addEventListener("click", () => Modes[b.dataset.mode]());
+function activeGuessers() {
+  const c = HW.cur;
+  return HW.names.map((_, i) => i).filter((i) => i !== c.setter && !c.solved.has(i));
 }
-$("guess-form").addEventListener("submit", (e) => {
+
+function startHintPhase() {
+  const c = HW.cur;
+  c.phase++;
+  c.phaseHints = 0;
+  $("hw-hint-msg").textContent = "";
+  renderHint();
+  show("hw-hint");
+}
+
+function renderHint() {
+  const c = HW.cur;
+  $("hw-hint-title").textContent = `第 ${c.phase} / ${MAX_PHASES} 階段 · 提示`;
+  $("hw-hint-sub").textContent = `出題者：${HW.names[c.setter]}　· 估中可得 ${PHASE_POINTS[c.phase - 1]} 分`;
+  $("hw-hint-count").textContent = `${c.phaseHints} / ${MAX_HINTS}`;
+  $("hw-hints").replaceChildren(
+    ...c.hints.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx), `階段 ${h.phase}`)),
+  );
+  const done = c.phaseHints >= MAX_HINTS;
+  $("hw-hint-input").disabled = done;
+  $("hw-to-guess").textContent = done ? "提示已用完，開始作答" : "停止提示，開始作答";
+  $("hw-to-guess").disabled = c.phaseHints === 0;
+  renderBoard($("hw-board-hint"));
+}
+
+function containsAnswerChar(hint, answer) {
+  return [...answer].some((ch) => hint.includes(ch));
+}
+
+$("hw-hint-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  submitGuess($("guess-input").value);
-  $("guess-input").focus();
+  const c = HW.cur;
+  const raw = $("hw-hint-input").value;
+  const idx = Engine.lookup(raw);
+  const msg = $("hw-hint-msg");
+  if (idx < 0) {
+    msg.textContent = raw.trim() ? `「${raw.trim()}」唔喺詞庫入面。` : "";
+    return;
+  }
+  const word = Engine.words[idx], answer = Engine.words[c.topic.target];
+  if (idx === c.topic.target || containsAnswerChar(word, answer)) {
+    msg.textContent = "提示唔可以包含隱藏詞入面的字。";
+    return;
+  }
+  if (c.hints.some((h) => h.idx === idx)) {
+    msg.textContent = `「${word}」已經提示過。`;
+    return;
+  }
+  c.hints.push({ idx, phase: c.phase });
+  c.phaseHints++;
+  $("hw-hint-input").value = "";
+  const p = c.topic.pct(idx);
+  if (p >= STOP_PCT) {
+    msg.textContent = `「${word}」相關度 ${fmtPct(p)}，達到 ${STOP_PCT}%！提示即時停止，進入作答。`;
+    renderHint();
+    $("hw-hint-input").disabled = true;
+    $("hw-to-guess").textContent = "進入作答";
+    return;
+  }
+  msg.textContent = c.phaseHints >= MAX_HINTS ? `已經用完 ${MAX_HINTS} 個提示。` : "";
+  renderHint();
 });
-$("btn-hint").addEventListener("click", useHint);
-$("btn-giveup").addEventListener("click", giveUp);
-$("btn-menu").addEventListener("click", () => show("menu"));
-$("btn-result-menu").addEventListener("click", () => show("menu"));
-$("btn-next").addEventListener("click", () => {
-  if (game.mode === "duel") {
-    if (duel.round === 0) { duel.round = 1; startSetter(); } else Modes.duel();
-  } else Modes[game.mode]();
+
+$("hw-to-guess").addEventListener("click", startGuessPhase);
+
+function startGuessPhase() {
+  const c = HW.cur;
+  c.guessQueue = activeGuessers();
+  c.guesses = new Map();
+  nextGuesser();
+}
+
+function nextGuesser() {
+  const c = HW.cur;
+  if (!c.guessQueue.length) return revealGuesses();
+  const p = c.guessQueue[0];
+  $("hw-guess-title").textContent = `輪到 ${HW.names[p]} 作答`;
+  const best = c.hints.slice().sort((a, b) => c.topic.rank[a.idx] - c.topic.rank[b.idx]);
+  $("hw-guess-hints").replaceChildren(...best.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx))));
+  $("hw-guess-input").value = "";
+  $("hw-guess-input").type = "password";
+  $("hw-guess-show").checked = false;
+  $("hw-guess-msg").textContent = "";
+  show("hw-guess");
+}
+
+bindReveal($("hw-guess-show"), $("hw-guess-input"));
+$("hw-guess-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const c = HW.cur;
+  const raw = $("hw-guess-input").value.trim();
+  if (!raw) return;
+  const idx = Engine.lookup(raw);
+  if (idx < 0) {
+    $("hw-guess-msg").textContent = "呢個詞唔喺詞庫入面，換一個寫法或者另一個詞。";
+    return;
+  }
+  c.guesses.set(c.guessQueue.shift(), idx);
+  nextGuesser();
 });
+
+function revealGuesses() {
+  const c = HW.cur;
+  const pts = PHASE_POINTS[c.phase - 1];
+  const winners = [];
+  const rows = [];
+  for (const [player, idx] of c.guesses) {
+    const correct = idx === c.topic.target;
+    if (correct) {
+      c.solved.set(player, c.phase);
+      HW.scores[player] += pts;
+      HW.scores[c.setter] += SETTER_POINT;
+      winners.push(HW.names[player]);
+    }
+    const tr = el("tr", heat(c.topic.pct(idx)));
+    tr.append(el("td", null, HW.names[player]), el("td", "w", Engine.words[idx] + (correct ? " 🎯" : "")),
+      el("td", "p", fmtPct(c.topic.pct(idx))));
+    rows.push(tr);
+  }
+  $("hw-reveal-list").replaceChildren(...rows);
+  $("hw-reveal-title").textContent = `第 ${c.phase} 階段 · 公開答案`;
+
+  const remaining = activeGuessers();
+  const over = remaining.length === 0 || c.phase >= MAX_PHASES;
+  let msg = winners.length ? `${winners.join("、")} 估中！各得 ${pts} 分，出題者得 ${winners.length * SETTER_POINT} 分。` : "無人估中。";
+  if (over) msg += `\n隱藏詞係「${Engine.words[c.topic.target]}」。`;
+  $("hw-reveal-msg").textContent = msg;
+
+  const near = $("hw-reveal-near");
+  near.classList.toggle("hidden", !over);
+  if (over) {
+    near.replaceChildren(
+      ...c.topic.order.slice(1, 11).map((i) => el("li", null, `${Engine.words[i]}　${fmtPct(c.topic.pct(i))}`)),
+    );
+  }
+  const btn = $("hw-reveal-next");
+  btn.textContent = over ? (HW.turn + 1 >= HW.turns.length ? "睇最終結果" : "下一位出題") : `進入第 ${c.phase + 1} 階段提示`;
+  btn.onclick = over ? nextTurn : startHintPhase;
+  renderBoard($("hw-board-reveal"));
+  show("hw-reveal");
+}
+
+function renderBoard(box) {
+  const order = HW.names.map((_, i) => i).sort((a, b) => HW.scores[b] - HW.scores[a]);
+  const c = HW.cur;
+  box.replaceChildren(el("h3", null, "分數"), ...order.map((i) => {
+    const row = el("div", "brow");
+    let tag = "";
+    if (c && i === c.setter) tag = "出題";
+    else if (c && c.solved.has(i)) tag = "已估中";
+    row.append(el("span", null, HW.names[i]), el("span", "tag", tag), el("b", null, String(HW.scores[i])));
+    return row;
+  }));
+}
+
+function finalScreen() {
+  HW.cur = null;
+  const max = Math.max(...HW.scores);
+  const winners = HW.names.filter((_, i) => HW.scores[i] === max);
+  $("hw-final-title").textContent = winners.length > 1 ? `平手：${winners.join("、")}` : `🏆 ${winners[0]} 勝出！`;
+  renderBoard($("hw-board-final"));
+  show("hw-final");
+}
+
+// ---------------- 導航 ----------------
+for (const b of document.querySelectorAll("[data-go]")) {
+  b.addEventListener("click", () => {
+    if (b.dataset.go === "hw-setup") renderNameInputs();
+    show(b.dataset.go);
+  });
+}
 
 Engine.load((p) => ($("load-bar").style.width = `${Math.round(p * 100)}%`))
   .then(() => show("menu"))
