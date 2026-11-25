@@ -76,16 +76,21 @@ async function fetchWithProgress(url, onProgress) {
   if (!res.ok) throw new Error(`${url}: ${res.status}`);
   const total = Number(res.headers.get("content-length")) || 0;
   if (!res.body || !total) return res.arrayBuffer();
+  // 注意：伺服器可能用 gzip 傳送（例如 GitHub Pages），content-length 是壓縮後大小，
+  // 而讀到的是解壓後資料，所以不能用 content-length 預先分配緩衝區。
   const reader = res.body.getReader();
-  const buf = new Uint8Array(total);
+  const chunks = [];
   let got = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    buf.set(value, got);
+    chunks.push(value);
     got += value.length;
-    onProgress(got / total);
+    onProgress(Math.min(got / total, 1));
   }
+  const buf = new Uint8Array(got);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.length; }
   return buf.buffer;
 }
 
@@ -402,5 +407,5 @@ $("btn-next").addEventListener("click", () => {
 Engine.load((p) => ($("load-bar").style.width = `${Math.round(p * 100)}%`))
   .then(() => show("menu"))
   .catch((err) => {
-    $("loading").replaceChildren(el("p", "msg", `載入失敗：${err.message}。請用本機伺服器開啟（見 README）。`));
+    $("loading").replaceChildren(el("p", "msg", `載入失敗：${err.message}。請重新整理頁面再試。`));
   });
