@@ -122,16 +122,22 @@ JIEBA_NOUN = {"n": "n", "ng": "n", "vn": "n", "an": "n", "s": "n", "t": "n",
               "ns": "p", "nz": "p", "nt": "p", "nr": "p", "nrt": "p", "j": "p"}
 
 
+# 「充满＿的」「感到＿」可以將情緒／狀態形容詞名詞化（例如 快樂、憤怒、寂寞）
 FRAMES = [("", ""), ("这是", "。"), ("一个", ""), ("我喜欢", "。")]
+NOMINAL_FRAMES = [("充满", "的"), ("感到", "。")]
+# 兼類詞：jieba 標為形容詞，但可以當名詞用（韓文對應詞多數本身就係名詞，例如 행복、고독）
+NOMINALIZABLE = {"a", "an"}
 
 
-def tag_words(simps: list[str], jieba_pos: dict[str, str]) -> str:
+def tag_words(simps: list[str], jieba_pos: dict[str, str], force_noun: set[str] = frozenset()) -> str:
     """回傳每個詞的類別字元：n 一般名詞 / p 專有名詞 / o 其他。
 
     單詞冇上下文時 tagger 會出錯（例如將「烏龜」當專有名詞、「草莓」當動詞），所以：
       - 將詞放入 4 個句式分別標注，數有幾多次被標成名詞（NN/NT/NR）
       - jieba 詞性係名詞類就加 2 票
       - 總票數 ≥ 2 → 名詞；其中 NR（專有名詞）≥ 3 次 → 專有名詞
+      - 形容詞（jieba a/an、2 字以上）放入「充滿＿的」「感到＿」，有 1 次標成名詞就當名詞（快樂、寂寞）
+      - data/noun_overrides.txt 入面的詞一律當一般名詞（孤獨、緊張）
     提示用寬鬆標準，避免正常名詞被拒。"""
     try:
         import spacy
@@ -145,7 +151,9 @@ def tag_words(simps: list[str], jieba_pos: dict[str, str]) -> str:
 
     noun = [0] * len(simps)
     proper = [0] * len(simps)
-    for pre, post in FRAMES:
+    nominal = [0] * len(simps)
+    jobs = [(f, False) for f in FRAMES] + [(f, True) for f in NOMINAL_FRAMES]
+    for (pre, post), is_nominal in jobs:
         docs, at = [], []
         for w in simps:
             toks = [t for t in (pre, w, post) if t]
@@ -155,13 +163,18 @@ def tag_words(simps: list[str], jieba_pos: dict[str, str]) -> str:
             docs = list(proc.pipe(docs, batch_size=2000))
         for i, (d, j) in enumerate(zip(docs, at)):
             tag = d[j].tag_
-            noun[i] += tag in NOUN_TAGS
-            proper[i] += tag == "NR"
+            if is_nominal:
+                nominal[i] += tag in ("NN", "NT")
+            else:
+                noun[i] += tag in NOUN_TAGS
+                proper[i] += tag == "NR"
     out = []
     for i, w in enumerate(simps):
         jp = JIEBA_NOUN.get(jieba_pos.get(w, ""))
         votes = noun[i] + (2 if jp else 0)
-        if votes < 2:
+        if w in force_noun:
+            out.append("n")
+        elif votes < 2 and not (len(w) >= 2 and nominal[i] >= 1 and jieba_pos.get(w) in NOMINALIZABLE):
             out.append("o")
         elif proper[i] >= 3 or (jp == "p" and proper[i] >= 2):
             out.append("p")
@@ -281,7 +294,9 @@ def main():
             break
         add(simp)
 
-    pos = list(tag_words(simps, jieba_pos))
+    overrides = ROOT / "data" / "noun_overrides.txt"
+    force_noun = {t2s.convert(w) for w in read_answers(overrides)} if overrides.exists() else set()
+    pos = list(tag_words(simps, jieba_pos, force_noun))
     # 答案清單係人手揀的一般名詞：以人手判斷為準，只提示 tagger 有異議的詞
     doubt = [words[i] for i in answer_idx if pos[i] != "n"]
     if doubt:
