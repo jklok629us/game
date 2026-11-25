@@ -6,7 +6,7 @@
   1. 從 jieba 詞典取常用詞（按詞頻排序，按詞性過濾，剔除人名、數詞等）
   2. 跟詞向量模型取交集（預設用 spaCy zh_core_web_lg 的 50 萬個 300 維詞向量）
   3. 簡體轉繁體（OpenCC s2hk），並記錄簡體／台灣繁體寫法作別名
-  4. 向量正規化 → （可選）PCA 降維 → 每行獨立量化為 int8
+  4. 向量正規化 → 扣除「垃圾網頁方向」（見 data/spam_seeds.txt）→ PCA 降維 → 每行獨立量化為 int8
   5. 詞性標注（spaCy 中文 tagger）：n = 一般名詞、p = 專有名詞、o = 其他
      跟節目規則：提示只可用名詞（專有名詞可以）；答案只可用一般名詞
   6. 為每個答案計算難度（易／中／難），前端派題時會平均分配
@@ -205,6 +205,9 @@ def main():
     ap.add_argument("--extra", type=Path, default=ROOT / "data" / "extra_words.txt",
                     help="額外加入詞庫的詞（例如專有名詞）")
     ap.add_argument("--out", type=Path, default=ROOT / "web" / "data")
+    ap.add_argument("--spam-seeds", type=Path, default=ROOT / "data" / "spam_seeds.txt",
+                    help="垃圾網頁種子詞；用嚟搵出並扣除垃圾方向")
+    ap.add_argument("--spam-dims", type=int, default=3, help="扣除幾多個垃圾方向；0 = 唔扣")
     ap.add_argument("--size", type=int, default=30000, help="詞庫大小（不計答案及額外詞）")
     ap.add_argument("--dim", type=int, default=128, help="PCA 降維後的維度；0 = 不降維")
     args = ap.parse_args()
@@ -292,6 +295,18 @@ def main():
 
     m = np.stack(mats).astype(np.float32)
     m /= np.linalg.norm(m, axis=1, keepdims=True)
+
+    # 扣除垃圾方向：用種子詞（六合彩、玄機…）的主成分做方向，將所有向量投影到其正交補空間
+    if args.spam_dims and args.spam_seeds.exists():
+        seeds = [vecs.get(t2s.convert(w)) for w in read_answers(args.spam_seeds)]
+        seeds = [x / np.linalg.norm(x) for x in seeds if x is not None and np.any(x)]
+        if len(seeds) > args.spam_dims:
+            mu = m.mean(axis=0, keepdims=True)
+            _, _, vt = np.linalg.svd(np.stack(seeds) - mu, full_matrices=False)
+            d = vt[: args.spam_dims]
+            m = m - (m - mu) @ d.T @ d
+            m /= np.linalg.norm(m, axis=1, keepdims=True)
+            print(f"  已扣除 {args.spam_dims} 個垃圾方向（種子詞 {len(seeds)} 個）", file=sys.stderr)
     if args.dim and args.dim < m.shape[1]:
         mean = m.mean(axis=0, keepdims=True)
         _, _, vt = np.linalg.svd(m - mean, full_matrices=False)

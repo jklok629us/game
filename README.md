@@ -45,7 +45,7 @@ python3 -m http.server 8000
 jieba 常用詞（按詞頻、詞性過濾）
    ∩ spaCy zh_core_web_lg 詞向量（50 萬詞 × 300 維）
    → OpenCC 簡轉繁（保留簡體 / 台灣寫法作別名）
-   → 正規化 → PCA 降到 128 維 → int8 量化
+   → 正規化 → 扣除「垃圾網頁方向」（data/spam_seeds.txt）→ PCA 降到 128 維 → int8 量化
    → web/data/vocab.json（3 萬詞）+ vectors.bin（3.8 MB）+ answers.json
 
 [瀏覽器：web/app.js]
@@ -78,6 +78,10 @@ python tools/build_data.py \
 | `--w2v` | — | 改用其他 word2vec 文字格式向量，例如 Tencent AI Lab Embedding、fastText `cc.zh.300.vec` |
 
 ## 已知限制 / 下一步
+
+- 詞向量用網絡爬蟲資料訓練，混有大量六合彩／賭博垃圾網頁，曾令「信封」接近「玄機、六合、九龍」。
+  建置時會用 `data/spam_seeds.txt` 的種子詞找出 3 個「垃圾方向」並從所有向量扣除；
+  如發現其他怪異聯想，可加種子詞再重新建置。
 
 - 詞向量用網絡文本訓練，部分聯想反映網絡用法（例如「蘋果」接近「手機」多過「香蕉」）。
 - 粵語口語詞（嘢、睇、咗）覆蓋較弱，可以考慮加入粵語語料訓練的向量，或者人手補同義詞表。
