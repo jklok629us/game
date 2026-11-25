@@ -196,7 +196,7 @@ def answer_difficulty(m: np.ndarray, answers: list[int], words: list[str], pos: 
         sims = m @ m[a]
         order = np.argsort(-sims)
         hints = [i for i in order[1:400]
-                 if pos[i] in "np" and not set(words[i]) & set(words[a])][:k]
+                 if pos[i] in "np" and words[a] not in words[i] and words[i] not in words[a]][:k]
         rec = []
         for h in hints:
             sh = m @ m[h]

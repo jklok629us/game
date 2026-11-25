@@ -425,7 +425,8 @@ function renderHint() {
   renderBoard($("hw-board-hint"));
 }
 
-const sharesChar = (a, b) => [...b].some((ch) => a.includes(ch));
+/** 提示同隱藏詞有「包含」關係（例如 聖誕 ⊂ 聖誕節、熊 ⊂ 熊貓）→ 唔可以用；只係共用個別字（醫院／醫生）就得 */
+const overlaps = (hint, answer) => hint.includes(answer) || answer.includes(hint);
 
 /** 10 個提示都未到 95%：AI 公開一個同隱藏詞最相似、未出現過的名詞 */
 function aiReveal() {
@@ -433,7 +434,7 @@ function aiReveal() {
   const answer = Engine.words[c.topic.target];
   const shown = new Set(c.hints.map((h) => h.idx));
   for (const i of c.topic.order.slice(1)) {
-    if (!shown.has(i) && Engine.isNoun(i) && !sharesChar(Engine.words[i], answer)) return i;
+    if (!shown.has(i) && Engine.isNoun(i) && !overlaps(Engine.words[i], answer)) return i;
   }
   return -1;
 }
@@ -454,8 +455,8 @@ $("hw-hint-form").addEventListener("submit", (e) => {
     msg.textContent = `「${word}」唔係名詞。提示只可以用名詞（專有名詞都得）。`;
     return;
   }
-  if (idx === c.topic.target || sharesChar(word, answer)) {
-    msg.textContent = "提示唔可以包含隱藏詞入面的字。";
+  if (idx === c.topic.target || overlaps(word, answer)) {
+    msg.textContent = "提示唔可以包含成個隱藏詞，亦唔可以係隱藏詞的一部分。";
     return;
   }
   if (c.hints.some((h) => h.idx === idx)) {
