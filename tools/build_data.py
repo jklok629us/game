@@ -265,7 +265,7 @@ def main():
         idx = add(simp, trad)
         if idx is None:
             print(f"  [略過答案] 找不到向量：{trad}", file=sys.stderr)
-        else:
+        elif idx not in answer_idx:
             answer_idx.append(idx)
 
     n_extra = 0

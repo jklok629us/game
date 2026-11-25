@@ -77,6 +77,16 @@ python tools/build_data.py \
 | `--dim` | 128 | PCA 降維；`0` 表示保留原本 300 維（約 9 MB） |
 | `--w2v` | — | 改用其他 word2vec 文字格式向量，例如 Tencent AI Lab Embedding、fastText `cc.zh.300.vec` |
 
+## 設定
+
+- **贊助按鈕**：在 `web/app.js` 頂部設定 `DONATE_URL`（例如 Buy Me a Coffee / Ko-fi / PayPal.me 連結）。
+  留空時，按下會顯示「贊助連結即將推出」。
+
+## 鳴謝
+
+詞向量：spaCy `zh_core_web_lg`（MIT）· 詞庫：jieba（MIT）· 繁簡轉換：OpenCC（Apache 2.0）。
+網頁介面刻意不顯示技術細節，鳴謝資料保留在此。
+
 ## 已知限制 / 下一步
 
 - 詞向量用網絡爬蟲資料訓練，混有大量六合彩／賭博垃圾網頁，曾令「信封」接近「玄機、六合、九龍」。

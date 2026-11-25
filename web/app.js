@@ -7,6 +7,9 @@
  *  - 模式：測試模式 / 隱藏詞對戰（參考《魔鬼的詭計：死亡重啟》第 5 日主賽「히든 워드」）
  * ========================================================= */
 
+// 贊助連結（例如 Buy Me a Coffee / Ko-fi / PayPal.me）。留空 = 顯示「即將推出」。
+const DONATE_URL = "";
+
 const STOP_PCT = 95;            // 提示達到此相關度即停止提示
 const MAX_HINTS = 10;           // 每階段最多提示數；用完仍未到 95% → AI 公開最相似的詞
 const MAX_PHASES = 3;           // 最多幾個提示／作答階段
@@ -129,12 +132,41 @@ async function fetchWithProgress(url, onProgress) {
 
 // ---------------- 工具 ----------------
 const $ = (id) => document.getElementById(id);
-function show(id) {
+let current = "loading";
+/** 切換畫面；同時更新頂部列，並加入瀏覽器歷史，令手機「返回」鍵都用得 */
+function show(id, { push = true } = {}) {
+  const sec = $(id);
   for (const s of document.querySelectorAll("main > section")) s.classList.toggle("hidden", s.id !== id);
-  const input = document.querySelector(`#${id} input:not([type=checkbox])`);
-  if (input) setTimeout(() => input.focus(), 50);
+  const home = id === "menu" || id === "loading";
+  $("hero").classList.toggle("hidden", !home);
+  $("btn-back").classList.toggle("hidden", home);
+  $("topbar-title").textContent = sec.dataset.title || "";
+  document.body.classList.toggle("home", home);
+  if (push && id !== current && id !== "loading") history.pushState({ id }, "");
+  current = id;
+  const input = sec.querySelector("input:not([type=checkbox]):not([type=password])");
+  if (input && window.matchMedia("(pointer: fine)").matches) setTimeout(() => input.focus(), 50);
   window.scrollTo(0, 0);
 }
+
+// 返回：遊戲進行中要確認先離開
+const BACK = { "sb-setup": "menu", "sb-play": "sb-setup", "hw-setup": "menu", "hw-final": "menu" };
+function goBack() {
+  if ($(current).hasAttribute("data-ingame")) {
+    if (!confirm("確定離開？今局遊戲進度會消失。")) return false;
+    HW = null;
+    show("hw-setup", { push: false });
+    return true;
+  }
+  show(BACK[current] || "menu", { push: false });
+  return true;
+}
+$("btn-back").addEventListener("click", () => goBack());
+window.addEventListener("popstate", () => {
+  if (current === "menu" || current === "loading") return;
+  // 取消離開時，補返一個歷史紀錄，令下次撳返回仍然有效
+  if (!goBack()) history.pushState({ id: current }, "");
+});
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -297,30 +329,59 @@ function nextTurn() {
   HW.pick = -1;
   $("hw-secret-round").textContent = `第 ${round + 1} / ${HW.rounds} 回合 · 第 ${HW.turn + 1} / ${HW.turns.length} 題`;
   $("hw-secret-title").textContent = `${HW.names[setter]} 出題`;
-  renderEnvelope();
+  $("hw-secret-tip").textContent = "其他玩家請轉身！";
+  $("env-name").textContent = HW.names[setter];
+  $("env-stage").className = "env-stage";
+  $("env-hint").textContent = "撳一下拆開信封";
+  $("hw-envelope").replaceChildren();
+  $("hw-secret-ok").classList.add("hidden");
   show("hw-secret");
 }
 
-function renderEnvelope() {
+// 拆信封：封口打開 → 題目卡逐張飛出
+$("env-art").addEventListener("click", () => {
+  const stage = $("env-stage");
+  if (!HW || stage.classList.contains("open")) return;
+  stage.classList.add("open");
+  $("env-hint").textContent = "揀一個做隱藏詞";
+  renderEnvelope(true);
+  $("hw-secret-ok").classList.remove("hidden");
+});
+
+function renderEnvelope(animate = false) {
   const s = HW.cur.setter;
-  const box = $("hw-envelope");
-  box.replaceChildren(...HW.envelopes[s].map((idx) => {
+  const cards = HW.envelopes[s].map((idx, k) => {
     const used = HW.used[s].has(idx);
-    const b = el("button", `card t${Engine.tiers.get(idx)}${HW.pick === idx ? " picked" : ""}`);
+    const t = Engine.tiers.get(idx);
+    const b = el("button", `card t${t}`);
     b.type = "button";
     b.disabled = used;
-    b.append(el("b", null, Engine.words[idx]), el("small", null, used ? "已用" : TIER_NAME[Engine.tiers.get(idx)]));
+    b.style.setProperty("--i", k);
+    if (animate) b.classList.add("deal");
+    if (HW.pick === idx) b.classList.add("picked");
+    else if (HW.pick >= 0) b.classList.add("dim");
+    b.append(el("small", "card-tier", used ? "已用" : TIER_NAME[t]), el("b", null, Engine.words[idx]));
     b.addEventListener("click", () => { HW.pick = idx; renderEnvelope(); });
     return b;
-  }));
+  });
+  $("hw-envelope").replaceChildren(...cards);
   $("hw-secret-ok").disabled = HW.pick < 0;
 }
 
+// 確定：其他卡收返入信封，揀中嗰張封存
 $("hw-secret-ok").addEventListener("click", () => {
-  if (HW.pick < 0) return;
-  HW.used[HW.cur.setter].add(HW.pick);
-  HW.cur.topic = Engine.topic(HW.pick);
-  startHintPhase();
+  if (HW.pick < 0 || $("env-stage").classList.contains("sealing")) return;
+  const pick = HW.pick;
+  $("env-stage").classList.add("sealing");
+  $("hw-secret-ok").classList.add("hidden");
+  $("env-hint").textContent = "隱藏詞已封存 ✦";
+  $("hw-secret-tip").textContent = "可以叫其他人轉返嚟啦！";
+  setTimeout(() => {
+    if (!HW || !HW.cur || HW.pick !== pick) return;
+    HW.used[HW.cur.setter].add(pick);
+    HW.cur.topic = Engine.topic(pick);
+    startHintPhase();
+  }, matchMedia("(prefers-reduced-motion: reduce)").matches ? 300 : 1500);
 });
 
 function startHintPhase() {
@@ -340,7 +401,7 @@ function renderHint() {
     `出題者：${HW.names[c.setter]}　· 今階段無人估中，出題者得 ${SETTER_POINTS[c.phase - 1]} 分`;
   $("hw-hint-count").textContent = `${c.phaseHints} / ${MAX_HINTS}`;
   $("hw-hints").replaceChildren(
-    ...c.hints.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx), h.ai ? "🤖 AI 公開" : `階段 ${h.phase}`)),
+    ...c.hints.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx), h.ai ? "🎁 額外提示" : `階段 ${h.phase}`)),
   );
   $("hw-hint-input").disabled = c.stopped;
   $("hw-hint-form").querySelector("button").disabled = c.stopped;
@@ -397,7 +458,7 @@ $("hw-hint-form").addEventListener("submit", (e) => {
     const ai = aiReveal();
     if (ai >= 0) c.hints.push({ idx: ai, phase: c.phase, ai: true });
     msg.textContent = `${MAX_HINTS} 個提示都未超過 ${STOP_PCT}%。` +
-      (ai >= 0 ? `AI 公開同隱藏詞最相似的詞：「${Engine.words[ai]}」（${fmtPct(c.topic.pct(ai))}）。` : "");
+      (ai >= 0 ? `送多一個提示：「${Engine.words[ai]}」（${fmtPct(c.topic.pct(ai))}）。` : "");
   } else msg.textContent = "";
   renderHint();
 });
@@ -418,7 +479,7 @@ function nextGuesser() {
   $("hw-guess-title").textContent = `輪到 ${HW.names[p]} 作答`;
   const best = c.hints.slice().sort((a, b) => c.topic.rank[a.idx] - c.topic.rank[b.idx]);
   $("hw-guess-hints").replaceChildren(
-    ...best.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx), h.ai ? "🤖" : null)),
+    ...best.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx), h.ai ? "🎁" : null)),
   );
   $("hw-guess-input").value = "";
   $("hw-guess-input").type = "password";
@@ -514,8 +575,21 @@ for (const b of document.querySelectorAll("[data-go]")) {
   });
 }
 
+// ---------------- 贊助 ----------------
+$("btn-donate").addEventListener("click", () => {
+  const link = $("donate-link");
+  link.classList.toggle("hidden", !DONATE_URL);
+  $("donate-soon").classList.toggle("hidden", !!DONATE_URL);
+  if (DONATE_URL) link.href = DONATE_URL;
+  const d = $("donate-dialog");
+  if (d.showModal) d.showModal(); else alert("多謝支持！贊助連結即將推出。");
+});
+
 Engine.load((p) => ($("load-bar").style.width = `${Math.round(p * 100)}%`))
-  .then(() => show("menu"))
+  .then(() => {
+    history.replaceState({ id: "menu" }, "");
+    show("menu", { push: false });
+  })
   .catch((err) => {
     $("loading").replaceChildren(el("p", "msg", `載入失敗：${err.message}。請重新整理頁面再試。`));
   });
