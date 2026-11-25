@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>猜詞作戰</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>猜詞<span>作戰</span></h1>
+    <p class="tag">AI 語意聯想猜詞遊戲 · 越接近答案，相似度越高</p>
+  </header>
+
+  <main id="app">
+    <section id="loading" class="panel">
+      <p>正在載入 AI 詞向量…</p>
+      <div class="bar"><div id="load-bar"></div></div>
+    </section>
+
+    <!-- 主選單 -->
+    <section id="menu" class="panel hidden">
+      <h2>選擇模式</h2>
+      <div class="modes">
+        <button class="mode" data-mode="daily">
+          <b>每日一題</b><small>所有人同一個答案</small>
+        </button>
+        <button class="mode" data-mode="random">
+          <b>隨機練習</b><small>隨機抽一題</small>
+        </button>
+        <button class="mode" data-mode="versus">
+          <b>雙人搶答</b><small>同一題輪流猜，猜中者勝；你的線索對手也看得到</small>
+        </button>
+        <button class="mode" data-mode="duel">
+          <b>出題對決</b><small>互相出題，用最少次數猜中者勝</small>
+        </button>
+      </div>
+      <details class="howto">
+        <summary>玩法說明</summary>
+        <ul>
+          <li>輸入任何中文詞（繁簡皆可），AI 會計算它和答案的<b>語意相似度</b>。</li>
+          <li>相似度來自詞向量：意思越接近、越常在同一語境出現的詞，分數越高。</li>
+          <li>如果你的詞是答案最接近的 1000 個詞之一，會顯示<b>排名</b>（第 1 名最接近）。</li>
+          <li>答案的相似度是 100。「提示」會揭露一個比你目前最佳更接近的詞。</li>
+        </ul>
+      </details>
+    </section>
+
+    <!-- 出題（出題對決用） -->
+    <section id="setter" class="panel hidden">
+      <h2 id="setter-title">玩家 1 出題</h2>
+      <p class="muted">對手請轉身！輸入一個詞作答案（必須在詞庫內）。</p>
+      <form id="setter-form" class="row">
+        <input id="setter-input" type="password" autocomplete="off" placeholder="秘密答案">
+        <button type="submit">確定</button>
+      </form>
+      <p id="setter-msg" class="msg"></p>
+    </section>
+
+    <!-- 遊戲畫面 -->
+    <section id="game" class="panel hidden">
+      <div class="game-head">
+        <div>
+          <h2 id="game-title">每日一題</h2>
+          <p id="game-sub" class="muted"></p>
+        </div>
+        <button id="btn-menu" class="ghost">返回選單</button>
+      </div>
+
+      <div id="turn" class="turn hidden"></div>
+
+      <form id="guess-form" class="row">
+        <input id="guess-input" autocomplete="off" placeholder="輸入一個詞…" enterkeyhint="go">
+        <button type="submit">猜</button>
+      </form>
+      <p id="msg" class="msg"></p>
+
+      <div id="last" class="last hidden"></div>
+
+      <div class="actions">
+        <button id="btn-hint" class="ghost">提示</button>
+        <button id="btn-giveup" class="ghost danger">放棄</button>
+        <span id="stats" class="muted"></span>
+      </div>
+
+      <table class="guesses">
+        <thead><tr><th>#</th><th>詞</th><th>相似度</th><th>排名</th></tr></thead>
+        <tbody id="guess-list"></tbody>
+      </table>
+    </section>
+
+    <!-- 結果 -->
+    <section id="result" class="panel hidden">
+      <h2 id="result-title"></h2>
+      <p id="result-body"></p>
+      <h3>最接近答案的詞</h3>
+      <ol id="nearest" class="nearest"></ol>
+      <div class="row">
+        <button id="btn-next">繼續</button>
+        <button id="btn-result-menu" class="ghost">返回選單</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">詞向量：spaCy zh_core_web_lg · 詞庫：jieba 常用詞 · 繁簡轉換：OpenCC</footer>
+  <script src="app.js"></script>
+</body>
+</html>

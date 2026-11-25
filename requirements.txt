@@ -1,0 +1,7 @@
+# 只有重新建置詞庫資料 (tools/build_data.py) 時才需要；玩遊戲不需要。
+numpy
+jieba
+opencc-python-reimplemented
+spacy>=3.8
+# 中文詞向量模型（約 600MB）：
+# pip install https://github.com/explosion/spacy-models/releases/download/zh_core_web_lg-3.8.0/zh_core_web_lg-3.8.0-py3-none-any.whl --no-deps
