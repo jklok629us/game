@@ -28,7 +28,7 @@
           <b>測試模式</b><small>揀一個題目，輸入任何詞，睇吓同題目相關度有幾高</small>
         </button>
         <button class="mode" data-go="hw-setup">
-          <b>隱藏詞對戰</b><small>多人輪流出題：出題者俾提示詞，其他人估隱藏詞</small>
+          <b>隱藏詞對戰</b><small>跟節目「히든 워드」規則：出題者俾提示詞，其他人估隱藏詞</small>
         </button>
       </div>
       <details class="howto">
@@ -99,16 +99,18 @@
         <select id="hw-rounds"><option value="1">1 回合</option><option value="2" selected>2 回合</option></select>
       </label>
       <details class="howto" open>
-        <summary>規則</summary>
+        <summary>規則（參考《魔鬼的詭計：死亡重啟》第 5 日主賽）</summary>
         <ol>
-          <li>出題次序隨機。出題者秘密揀一個<b>隱藏詞</b>。</li>
-          <li><b>提示階段</b>：出題者逐個公開提示詞，AI 即時顯示每個提示同隱藏詞的相關度。
-            每階段最多 <b>10 個</b>提示；提示不可以包含隱藏詞的字。</li>
-          <li>一旦有提示達到 <b>95% 或以上</b>，提示<b>即時停止</b>，進入作答。出題者亦可提早停止。</li>
-          <li><b>作答階段</b>：其他玩家輪流秘密寫下答案，然後同時公開。</li>
-          <li>最多 <b>3 個階段</b>。越早估中分越高：第 1 階段 3 分、第 2 階段 2 分、第 3 階段 1 分。
-            出題者每有一人估中得 1 分。</li>
-          <li>所有回合完結後，總分最高者勝。</li>
+          <li><b>派信封</b>：每人獲派 5 個一般名詞（2 易、2 中、1 難，人人難度一樣）。
+            每回合出題者從自己的信封揀 1 個做<b>隱藏詞</b>；第 2 回合從剩低 4 個再揀。</li>
+          <li><b>提示</b>：出題者逐個公開提示詞，AI 即時顯示同隱藏詞的相關度。
+            提示必須係<b>名詞</b>（人名、地名、品牌、作品等<b>專有名詞都得</b>），不可以包含隱藏詞的字。</li>
+          <li>有提示<b>超過 95%</b> → 提示即時停止，進入作答。
+            出完 <b>10 個</b>都未超過 95% → AI 公開一個同隱藏詞最相似的詞，然後作答。</li>
+          <li><b>作答</b>：其他玩家輪流秘密寫答案，然後同時公開。</li>
+          <li><b>計分</b>：估中者得 <b>1 分</b>，該出題者的回合即時結束。
+            無人估中 → 出題者得分（第 1／2／3 階段分別 <b>1／2／3 分</b>），再進入下一階段提示，最多 3 階段。</li>
+          <li>每回合每人出題一次，所有回合完結後總分最高者勝。</li>
         </ol>
       </details>
       <button id="hw-start">開始遊戲</button>
@@ -117,16 +119,9 @@
     <section id="hw-secret" class="panel hidden">
       <p class="muted" id="hw-secret-round"></p>
       <h2 id="hw-secret-title"></h2>
-      <p class="muted">其他玩家請轉身！揀一個隱藏詞（必須在詞庫內）。</p>
-      <form id="hw-secret-form">
-        <div class="row">
-          <input id="hw-secret-input" type="password" autocomplete="off" placeholder="隱藏詞">
-          <button type="button" id="hw-secret-random" class="ghost">隨機</button>
-        </div>
-        <label class="check"><input type="checkbox" id="hw-secret-show"> 顯示我輸入的字</label>
-        <p id="hw-secret-msg" class="msg"></p>
-        <button type="submit">確定</button>
-      </form>
+      <p class="muted">其他玩家請轉身！從你的信封揀一個隱藏詞。</p>
+      <div id="hw-envelope" class="envelope"></div>
+      <button id="hw-secret-ok" disabled>確定</button>
     </section>
 
     <section id="hw-hint" class="panel hidden">
@@ -139,12 +134,12 @@
       </div>
       <form id="hw-hint-form" class="row">
         <input id="hw-hint-input" autocomplete="off" placeholder="出題者輸入提示詞…" enterkeyhint="go">
-        <button type="submit">公開</button>
+        <button type="submit">公開提示</button>
       </form>
       <p id="hw-hint-msg" class="msg"></p>
       <ul id="hw-hints" class="scores"></ul>
       <div class="actions">
-        <button id="hw-to-guess">停止提示，開始作答</button>
+        <button id="hw-to-guess" class="hidden">進入作答</button>
       </div>
       <div class="board" id="hw-board-hint"></div>
     </section>

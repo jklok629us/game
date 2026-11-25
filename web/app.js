@@ -8,10 +8,12 @@
  * ========================================================= */
 
 const STOP_PCT = 95;            // 提示達到此相關度即停止提示
-const MAX_HINTS = 10;           // 每階段最多提示數
+const MAX_HINTS = 10;           // 每階段最多提示數；用完仍未到 95% → AI 公開最相似的詞
 const MAX_PHASES = 3;           // 最多幾個提示／作答階段
-const PHASE_POINTS = [3, 2, 1]; // 第 n 階段估中的分數
-const SETTER_POINT = 1;         // 出題者：每有一人估中得分
+const GUESSER_POINT = 1;        // 估中者得分（有人估中即結束該出題者的回合）
+const SETTER_POINTS = [1, 2, 3];// 第 n 階段無人估中 → 出題者得分
+const ENVELOPE = [0, 0, 1, 1, 2];// 每人派 5 個答案：2 易、2 中、1 難（人人一樣）
+const TIER_NAME = ["易", "中", "難"];
 
 // ---------------- 語意引擎 ----------------
 const Engine = {
@@ -20,7 +22,9 @@ const Engine = {
   aliases: {},
   dim: 0,
   vecs: null,
-  answers: [],
+  answers: [],     // 答案 index
+  tiers: new Map(),// 答案 index -> 難度 0/1/2
+  pos: "",         // 每個詞的詞性：n 一般名詞 / p 專有名詞 / o 其他
 
   async load(onProgress) {
     const [vocab, answers] = await Promise.all([
@@ -31,7 +35,9 @@ const Engine = {
     this.words = vocab.words;
     this.aliases = vocab.aliases;
     this.dim = vocab.dim;
-    this.answers = answers;
+    this.answers = answers.map((a) => a[0]);
+    this.tiers = new Map(answers);
+    this.pos = vocab.pos || "";
     this.words.forEach((w, i) => this.index.set(w, i));
 
     const q = new Int8Array(raw);
@@ -46,6 +52,10 @@ const Engine = {
       for (let k = 0; k < d; k++) v[o + k] = q[o + k] * inv;
     }
     this.vecs = v;
+  },
+
+  isNoun(i) {
+    return !this.pos || this.pos[i] !== "o";
   },
 
   lookup(raw) {
@@ -236,7 +246,7 @@ $("sb-nearest").addEventListener("click", () => {
 });
 
 // =========================================================
-// 隱藏詞對戰
+// 隱藏詞對戰（跟《魔鬼的詭計：死亡重啟》第 5 日主賽「히든 워드」）
 // =========================================================
 let HW = null;
 
@@ -255,6 +265,14 @@ function renderNameInputs() {
 }
 $("hw-count").addEventListener("change", renderNameInputs);
 
+/** 派信封：每人 5 個一般名詞，難度組合人人一樣（2 易、2 中、1 難），全場不重複 */
+function dealEnvelopes(n) {
+  const byTier = [[], [], []];
+  for (const [i, t] of Engine.tiers) byTier[t].push(i);
+  byTier.forEach(shuffle);
+  return Array.from({ length: n }, () => ENVELOPE.map((t) => byTier[t].pop()));
+}
+
 $("hw-start").addEventListener("click", () => {
   const names = [...$("hw-names").querySelectorAll("input")].map((i, k) => i.value.trim() || `玩家 ${k + 1}`);
   const rounds = Number($("hw-rounds").value);
@@ -262,7 +280,12 @@ $("hw-start").addEventListener("click", () => {
   for (let r = 0; r < rounds; r++) {
     for (const s of shuffle(names.map((_, i) => i))) turns.push({ round: r, setter: s });
   }
-  HW = { names, scores: names.map(() => 0), turns, turn: -1, rounds };
+  HW = {
+    names, rounds, turns, turn: -1,
+    scores: names.map(() => 0),
+    envelopes: dealEnvelopes(names.length),
+    used: names.map(() => new Set()),
+  };
   nextTurn();
 });
 
@@ -270,52 +293,41 @@ function nextTurn() {
   HW.turn++;
   if (HW.turn >= HW.turns.length) return finalScreen();
   const { round, setter } = HW.turns[HW.turn];
-  HW.cur = {
-    setter,
-    topic: null,
-    phase: 0,
-    hints: [],        // {idx, phase}
-    phaseHints: 0,
-    solved: new Map(), // player -> phase
-    guessers: [],
-    guessQueue: [],
-    guesses: new Map(),
-  };
+  HW.cur = { setter, topic: null, phase: 0, hints: [], phaseHints: 0, stopped: false, guessQueue: [], guesses: new Map() };
+  HW.pick = -1;
   $("hw-secret-round").textContent = `第 ${round + 1} / ${HW.rounds} 回合 · 第 ${HW.turn + 1} / ${HW.turns.length} 題`;
   $("hw-secret-title").textContent = `${HW.names[setter]} 出題`;
-  $("hw-secret-input").value = "";
-  $("hw-secret-input").type = "password";
-  $("hw-secret-show").checked = false;
-  $("hw-secret-msg").textContent = "";
+  renderEnvelope();
   show("hw-secret");
 }
 
-bindReveal($("hw-secret-show"), $("hw-secret-input"));
-$("hw-secret-random").addEventListener("click", () => {
-  $("hw-secret-input").value = Engine.words[randomAnswer()];
-  $("hw-secret-show").checked = true;
-  $("hw-secret-input").type = "text";
-});
-$("hw-secret-form").addEventListener("submit", (e) => {
-  e.preventDefault();
-  const idx = Engine.lookup($("hw-secret-input").value);
-  if (idx < 0) {
-    $("hw-secret-msg").textContent = "呢個詞唔喺詞庫入面，換一個吧。";
-    return;
-  }
-  HW.cur.topic = Engine.topic(idx);
+function renderEnvelope() {
+  const s = HW.cur.setter;
+  const box = $("hw-envelope");
+  box.replaceChildren(...HW.envelopes[s].map((idx) => {
+    const used = HW.used[s].has(idx);
+    const b = el("button", `card t${Engine.tiers.get(idx)}${HW.pick === idx ? " picked" : ""}`);
+    b.type = "button";
+    b.disabled = used;
+    b.append(el("b", null, Engine.words[idx]), el("small", null, used ? "已用" : TIER_NAME[Engine.tiers.get(idx)]));
+    b.addEventListener("click", () => { HW.pick = idx; renderEnvelope(); });
+    return b;
+  }));
+  $("hw-secret-ok").disabled = HW.pick < 0;
+}
+
+$("hw-secret-ok").addEventListener("click", () => {
+  if (HW.pick < 0) return;
+  HW.used[HW.cur.setter].add(HW.pick);
+  HW.cur.topic = Engine.topic(HW.pick);
   startHintPhase();
 });
-
-function activeGuessers() {
-  const c = HW.cur;
-  return HW.names.map((_, i) => i).filter((i) => i !== c.setter && !c.solved.has(i));
-}
 
 function startHintPhase() {
   const c = HW.cur;
   c.phase++;
   c.phaseHints = 0;
+  c.stopped = false;
   $("hw-hint-msg").textContent = "";
   renderHint();
   show("hw-hint");
@@ -324,25 +336,35 @@ function startHintPhase() {
 function renderHint() {
   const c = HW.cur;
   $("hw-hint-title").textContent = `第 ${c.phase} / ${MAX_PHASES} 階段 · 提示`;
-  $("hw-hint-sub").textContent = `出題者：${HW.names[c.setter]}　· 估中可得 ${PHASE_POINTS[c.phase - 1]} 分`;
+  $("hw-hint-sub").textContent =
+    `出題者：${HW.names[c.setter]}　· 今階段無人估中，出題者得 ${SETTER_POINTS[c.phase - 1]} 分`;
   $("hw-hint-count").textContent = `${c.phaseHints} / ${MAX_HINTS}`;
   $("hw-hints").replaceChildren(
-    ...c.hints.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx), `階段 ${h.phase}`)),
+    ...c.hints.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx), h.ai ? "🤖 AI 公開" : `階段 ${h.phase}`)),
   );
-  const done = c.phaseHints >= MAX_HINTS;
-  $("hw-hint-input").disabled = done;
-  $("hw-to-guess").textContent = done ? "提示已用完，開始作答" : "停止提示，開始作答";
-  $("hw-to-guess").disabled = c.phaseHints === 0;
+  $("hw-hint-input").disabled = c.stopped;
+  $("hw-hint-form").querySelector("button").disabled = c.stopped;
+  $("hw-to-guess").classList.toggle("hidden", !c.stopped);
   renderBoard($("hw-board-hint"));
 }
 
-function containsAnswerChar(hint, answer) {
-  return [...answer].some((ch) => hint.includes(ch));
+const sharesChar = (a, b) => [...b].some((ch) => a.includes(ch));
+
+/** 10 個提示都未到 95%：AI 公開一個同隱藏詞最相似、未出現過的名詞 */
+function aiReveal() {
+  const c = HW.cur;
+  const answer = Engine.words[c.topic.target];
+  const shown = new Set(c.hints.map((h) => h.idx));
+  for (const i of c.topic.order.slice(1)) {
+    if (!shown.has(i) && Engine.isNoun(i) && !sharesChar(Engine.words[i], answer)) return i;
+  }
+  return -1;
 }
 
 $("hw-hint-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const c = HW.cur;
+  if (c.stopped) return;
   const raw = $("hw-hint-input").value;
   const idx = Engine.lookup(raw);
   const msg = $("hw-hint-msg");
@@ -351,12 +373,16 @@ $("hw-hint-form").addEventListener("submit", (e) => {
     return;
   }
   const word = Engine.words[idx], answer = Engine.words[c.topic.target];
-  if (idx === c.topic.target || containsAnswerChar(word, answer)) {
+  if (!Engine.isNoun(idx)) {
+    msg.textContent = `「${word}」唔係名詞。提示只可以用名詞（專有名詞都得）。`;
+    return;
+  }
+  if (idx === c.topic.target || sharesChar(word, answer)) {
     msg.textContent = "提示唔可以包含隱藏詞入面的字。";
     return;
   }
   if (c.hints.some((h) => h.idx === idx)) {
-    msg.textContent = `「${word}」已經提示過。`;
+    msg.textContent = `「${word}」已經出現過。`;
     return;
   }
   c.hints.push({ idx, phase: c.phase });
@@ -364,13 +390,15 @@ $("hw-hint-form").addEventListener("submit", (e) => {
   $("hw-hint-input").value = "";
   const p = c.topic.pct(idx);
   if (p >= STOP_PCT) {
-    msg.textContent = `「${word}」相關度 ${fmtPct(p)}，達到 ${STOP_PCT}%！提示即時停止，進入作答。`;
-    renderHint();
-    $("hw-hint-input").disabled = true;
-    $("hw-to-guess").textContent = "進入作答";
-    return;
-  }
-  msg.textContent = c.phaseHints >= MAX_HINTS ? `已經用完 ${MAX_HINTS} 個提示。` : "";
+    c.stopped = true;
+    msg.textContent = `「${word}」相關度 ${fmtPct(p)}，超過 ${STOP_PCT}%！提示即時停止，進入作答。`;
+  } else if (c.phaseHints >= MAX_HINTS) {
+    c.stopped = true;
+    const ai = aiReveal();
+    if (ai >= 0) c.hints.push({ idx: ai, phase: c.phase, ai: true });
+    msg.textContent = `${MAX_HINTS} 個提示都未超過 ${STOP_PCT}%。` +
+      (ai >= 0 ? `AI 公開同隱藏詞最相似的詞：「${Engine.words[ai]}」（${fmtPct(c.topic.pct(ai))}）。` : "");
+  } else msg.textContent = "";
   renderHint();
 });
 
@@ -378,7 +406,7 @@ $("hw-to-guess").addEventListener("click", startGuessPhase);
 
 function startGuessPhase() {
   const c = HW.cur;
-  c.guessQueue = activeGuessers();
+  c.guessQueue = HW.names.map((_, i) => i).filter((i) => i !== c.setter);
   c.guesses = new Map();
   nextGuesser();
 }
@@ -389,7 +417,9 @@ function nextGuesser() {
   const p = c.guessQueue[0];
   $("hw-guess-title").textContent = `輪到 ${HW.names[p]} 作答`;
   const best = c.hints.slice().sort((a, b) => c.topic.rank[a.idx] - c.topic.rank[b.idx]);
-  $("hw-guess-hints").replaceChildren(...best.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx))));
+  $("hw-guess-hints").replaceChildren(
+    ...best.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx), h.ai ? "🤖" : null)),
+  );
   $("hw-guess-input").value = "";
   $("hw-guess-input").type = "password";
   $("hw-guess-show").checked = false;
@@ -414,15 +444,12 @@ $("hw-guess-form").addEventListener("submit", (e) => {
 
 function revealGuesses() {
   const c = HW.cur;
-  const pts = PHASE_POINTS[c.phase - 1];
   const winners = [];
   const rows = [];
   for (const [player, idx] of c.guesses) {
     const correct = idx === c.topic.target;
     if (correct) {
-      c.solved.set(player, c.phase);
-      HW.scores[player] += pts;
-      HW.scores[c.setter] += SETTER_POINT;
+      HW.scores[player] += GUESSER_POINT;
       winners.push(HW.names[player]);
     }
     const tr = el("tr", heat(c.topic.pct(idx)));
@@ -433,10 +460,16 @@ function revealGuesses() {
   $("hw-reveal-list").replaceChildren(...rows);
   $("hw-reveal-title").textContent = `第 ${c.phase} 階段 · 公開答案`;
 
-  const remaining = activeGuessers();
-  const over = remaining.length === 0 || c.phase >= MAX_PHASES;
-  let msg = winners.length ? `${winners.join("、")} 估中！各得 ${pts} 分，出題者得 ${winners.length * SETTER_POINT} 分。` : "無人估中。";
-  if (over) msg += `\n隱藏詞係「${Engine.words[c.topic.target]}」。`;
+  let msg;
+  if (winners.length) {
+    msg = `${winners.join("、")} 估中！各得 ${GUESSER_POINT} 分。${HW.names[c.setter]} 的出題結束。`;
+  } else {
+    const pts = SETTER_POINTS[c.phase - 1];
+    HW.scores[c.setter] += pts;
+    msg = `無人估中！出題者 ${HW.names[c.setter]} 得 ${pts} 分。`;
+  }
+  const over = winners.length > 0 || c.phase >= MAX_PHASES;
+  if (over) msg += `\n隱藏詞係「${Engine.words[c.topic.target]}」（難度：${TIER_NAME[Engine.tiers.get(c.topic.target)]}）。`;
   $("hw-reveal-msg").textContent = msg;
 
   const near = $("hw-reveal-near");
@@ -458,10 +491,8 @@ function renderBoard(box) {
   const c = HW.cur;
   box.replaceChildren(el("h3", null, "分數"), ...order.map((i) => {
     const row = el("div", "brow");
-    let tag = "";
-    if (c && i === c.setter) tag = "出題";
-    else if (c && c.solved.has(i)) tag = "已估中";
-    row.append(el("span", null, HW.names[i]), el("span", "tag", tag), el("b", null, String(HW.scores[i])));
+    row.append(el("span", null, HW.names[i]), el("span", "tag", c && i === c.setter ? "出題" : ""),
+      el("b", null, String(HW.scores[i])));
     return row;
   }));
 }
