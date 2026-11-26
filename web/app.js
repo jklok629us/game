@@ -24,7 +24,12 @@ const Engine = {
   index: new Map(),
   aliases: {},
   dim: 0,
-  vecs: null,
+  coreN: 0,        // 核心詞數：排名／百分比只按核心詞計，保持分數標準一致
+  extN: 0,
+  core: null,      // 核心詞向量（Float32Array，已正規化）
+  ext: null,       // 擴充詞向量
+  dyn: [],         // 即場組合出嚟的詞向量（例如 菠蘿包 = 菠蘿 + 包）
+  extState: "idle",// idle / loading / ready / failed
   answers: [],     // 答案 index
   tiers: new Map(),// 答案 index -> 難度 0/1/2
   abstract: new Set(), // 抽象／情緒類答案（輕鬆難度唔會派）
@@ -44,51 +49,159 @@ const Engine = {
     this.abstract = new Set(answers.filter((a) => a[2]).map((a) => a[0]));
     this.pos = vocab.pos || "";
     this.words.forEach((w, i) => this.index.set(w, i));
+    this.coreN = this.words.length;
+    this.core = normalizeRows(new Int8Array(raw), this.coreN, this.dim);
+  },
 
-    const q = new Int8Array(raw);
-    const n = this.words.length, d = this.dim;
-    if (q.length !== n * d) throw new Error("詞向量檔案大小不符");
-    const v = new Float32Array(n * d);
-    for (let i = 0; i < n; i++) {
-      let s = 0;
-      const o = i * d;
-      for (let k = 0; k < d; k++) s += q[o + k] * q[o + k];
-      const inv = 1 / Math.sqrt(s || 1);
-      for (let k = 0; k < d; k++) v[o + k] = q[o + k] * inv;
+  /** 背景載入擴充詞庫（香港用語、較少用的詞、單字） */
+  async loadExt() {
+    if (this.extState !== "idle") return;
+    this.extState = "loading";
+    try {
+      const [vocab, raw] = await Promise.all([
+        fetch("data/vocab_ext.json").then((r) => r.json()),
+        fetch("data/vectors_ext.bin").then((r) => {
+          if (!r.ok) throw new Error(r.status);
+          return r.arrayBuffer();
+        }),
+      ]);
+      if (vocab.offset !== this.coreN) throw new Error("擴充詞庫版本不符");
+      const n = vocab.words.length;
+      this.ext = normalizeRows(new Int8Array(raw), n, this.dim);
+      vocab.words.forEach((w, i) => {
+        this.words.push(w);
+        this.index.set(w, this.coreN + i);
+      });
+      Object.assign(this.aliases, vocab.aliases);
+      this.pos += vocab.pos;
+      this.extN = n;
+      this.extState = "ready";
+    } catch (e) {
+      console.warn("擴充詞庫載入失敗", e);
+      this.extState = "failed";
     }
-    this.vecs = v;
+  },
+
+  vec(i) {
+    const d = this.dim;
+    if (i < this.coreN) return this.core.subarray(i * d, (i + 1) * d);
+    const j = i - this.coreN;
+    if (j < this.extN) return this.ext.subarray(j * d, (j + 1) * d);
+    return this.dyn[j - this.extN];
+  },
+
+  dot(a, b) {
+    let s = 0;
+    for (let k = 0; k < a.length; k++) s += a[k] * b[k];
+    return s;
   },
 
   isNoun(i) {
     return !this.pos || this.pos[i] !== "o";
   },
 
-  lookup(raw) {
-    const w = raw.replace(/\s+/g, "");
-    if (!w) return -1;
+  exact(w) {
     if (this.index.has(w)) return this.index.get(w);
     if (w in this.aliases) return this.aliases[w];
+    if (/[A-Za-z]/.test(w)) { // 英文唔分大小寫（wifi = WiFi）
+      const lw = w.toLowerCase();
+      for (const [k, i] of this.index) if (k.toLowerCase() === lw) return i;
+    }
     return -1;
   },
 
-  /** 為一個題目預先計算所有詞的排名 */
-  topic(target) {
-    const n = this.words.length, d = this.dim, v = this.vecs;
-    const sims = new Float32Array(n);
-    const t = target * d;
-    for (let i = 0; i < n; i++) {
-      let s = 0;
-      const o = i * d;
-      for (let k = 0; k < d; k++) s += v[o + k] * v[t + k];
-      sims[i] = s;
+  /** 搵詞：-1 = 搵唔到；-2 = 擴充詞庫仲載入緊 */
+  lookup(raw) {
+    const w = raw.replace(/\s+/g, "");
+    if (!w) return -1;
+    const hit = this.exact(w);
+    if (hit >= 0) return hit;
+    if (this.extState === "idle" || this.extState === "loading") return -2;
+    return this.compose(w);
+  },
+
+  /**
+   * 組合詞：將詞拆成詞庫有的部分（由左至右揀最長），再將向量加埋。
+   * 例如 菠蘿包 = 菠蘿 + 包、智能手機 = 智能 + 手機。詞性跟最後一部分（中文組合詞中心喺尾）。
+   */
+  compose(w) {
+    const parts = [];
+    for (let i = 0; i < w.length;) {
+      let found = -1, len = 0;
+      for (let L = Math.min(6, w.length - i); L >= 1; L--) {
+        found = this.exact(w.slice(i, i + L));
+        if (found >= 0) { len = L; break; }
+      }
+      if (found < 0) return -1;
+      parts.push(found);
+      i += len;
     }
-    sims[target] = 2;
+    // 至少要有一部分係 2 字以上（避免「啊啊啊」咁樣全部單字亂砌都計分），兩部分組成就例外（例如 兔仔）
+    if (parts.length < 2 || (parts.length > 2 && parts.every((p) => this.words[p].length < 2))) return -1;
+    const v = new Float32Array(this.dim);
+    for (const p of parts) {
+      const pv = this.vec(p);
+      for (let k = 0; k < v.length; k++) v[k] += pv[k];
+    }
+    const norm = Math.sqrt(this.dot(v, v)) || 1;
+    for (let k = 0; k < v.length; k++) v[k] /= norm;
+    const idx = this.coreN + this.extN + this.dyn.length;
+    this.dyn.push(v);
+    this.words.push(w);
+    this.index.set(w, idx);
+    this.pos += this.pos[parts[parts.length - 1]] === "o" ? "o" : "n";
+    return idx;
+  },
+
+  /**
+   * 為一個題目計算核心詞排名。非核心詞（擴充詞、組合詞）就計佢同題目的相似度，
+   * 睇吓喺核心詞入面排第幾，咁所有詞都用同一把尺。
+   */
+  topic(target) {
+    const n = this.coreN, tv = this.vec(target);
+    const sims = new Float32Array(n);
+    for (let i = 0; i < n; i++) sims[i] = this.dot(this.vec(i), tv);
+    const inCore = target < n;
+    if (inCore) sims[target] = 2;
     const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => sims[b] - sims[a]);
+    const sorted = Float32Array.from(order, (i) => sims[i]); // 由大到細
+    const shift = inCore ? 0 : 1; // 題目唔喺核心詞時，佢自己佔第 0 名
     const rank = new Int32Array(n);
-    order.forEach((idx, r) => (rank[idx] = r)); // 題目本身 = 0，最接近 = 1
-    return { target, order, rank, pct: (i) => pctFromRank(rank[i]) };
+    order.forEach((idx, r) => (rank[idx] = r + shift));
+    const near = inCore ? order.slice(1) : order;
+    const rankOf = (i) => {
+      if (i === target) return 0;
+      if (i < n) return rank[i];
+      const s = this.dot(this.vec(i), tv);
+      let lo = 0, hi = sorted.length; // 搵有幾多個核心詞比佢更接近
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (sorted[mid] > s) lo = mid + 1; else hi = mid;
+      }
+      return Math.max(1, lo + shift);
+    };
+    return { target, near, rankOf, pct: (i) => pctFromRank(rankOf(i)) };
   },
 };
+
+function normalizeRows(q, n, d) {
+  if (q.length !== n * d) throw new Error("詞向量檔案大小不符");
+  const v = new Float32Array(n * d);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    const o = i * d;
+    for (let k = 0; k < d; k++) s += q[o + k] * q[o + k];
+    const inv = 1 / Math.sqrt(s || 1);
+    for (let k = 0; k < d; k++) v[o + k] = q[o + k] * inv;
+  }
+  return v;
+}
+
+/** 搵唔到詞時的訊息 */
+function lookupError(raw, code) {
+  if (code === -2) return "詞庫仲載入緊，請等一兩秒再試。";
+  return raw.trim() ? `搵唔到「${raw.trim()}」，試吓換個講法。` : "";
+}
 
 /**
  * 排名 → 相關度百分比。
@@ -222,7 +335,7 @@ $("sb-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const idx = Engine.lookup($("sb-topic").value);
   if (idx < 0) {
-    $("sb-setup-msg").textContent = "呢個詞唔喺詞庫入面，試另一個（或者撳「隨機」）。";
+    $("sb-setup-msg").textContent = lookupError($("sb-topic").value, idx) || "請輸入題目，或者撳「隨機」。";
     return;
   }
   $("sb-setup-msg").textContent = "";
@@ -243,7 +356,7 @@ function renderSandbox(latest) {
     ul.append(scoreItem(Engine.words[latest], SB.topic.pct(latest), "最新"));
     $("sb-last").append(ul);
   }
-  const sorted = SB.tested.slice().sort((a, b) => SB.topic.rank[a] - SB.topic.rank[b]);
+  const sorted = SB.tested.slice().sort((a, b) => SB.topic.rankOf(a) - SB.topic.rankOf(b));
   $("sb-list").replaceChildren(...sorted.map((i) => scoreItem(Engine.words[i], SB.topic.pct(i))));
   $("sb-near").classList.add("hidden");
   $("sb-word").value = "";
@@ -254,7 +367,7 @@ $("sb-test").addEventListener("submit", (e) => {
   const raw = $("sb-word").value;
   const idx = Engine.lookup(raw);
   if (idx < 0) {
-    $("sb-msg").textContent = raw.trim() ? `「${raw.trim()}」唔喺詞庫入面。` : "";
+    $("sb-msg").textContent = lookupError(raw, idx);
     return;
   }
   $("sb-msg").textContent = idx === SB.topic.target ? "🎯 100%！就係題目本身。" : "";
@@ -274,7 +387,7 @@ $("sb-clear").addEventListener("click", () => {
 $("sb-nearest").addEventListener("click", () => {
   const ol = $("sb-near");
   ol.replaceChildren(
-    ...SB.topic.order.slice(1, 11).map((i) => el("li", null, `${Engine.words[i]}　${fmtPct(SB.topic.pct(i))}`)),
+    ...SB.topic.near.slice(0, 10).map((i) => el("li", null, `${Engine.words[i]}　${fmtPct(SB.topic.pct(i))}`)),
   );
   ol.classList.toggle("hidden");
 });
@@ -433,7 +546,7 @@ function aiReveal() {
   const c = HW.cur;
   const answer = Engine.words[c.topic.target];
   const shown = new Set(c.hints.map((h) => h.idx));
-  for (const i of c.topic.order.slice(1)) {
+  for (const i of c.topic.near) {
     if (!shown.has(i) && Engine.isNoun(i) && !overlaps(Engine.words[i], answer)) return i;
   }
   return -1;
@@ -447,7 +560,7 @@ $("hw-hint-form").addEventListener("submit", (e) => {
   const idx = Engine.lookup(raw);
   const msg = $("hw-hint-msg");
   if (idx < 0) {
-    msg.textContent = raw.trim() ? `「${raw.trim()}」唔喺詞庫入面。` : "";
+    msg.textContent = lookupError(raw, idx);
     return;
   }
   const word = Engine.words[idx], answer = Engine.words[c.topic.target];
@@ -494,7 +607,7 @@ function nextGuesser() {
   if (!c.guessQueue.length) return revealGuesses();
   const p = c.guessQueue[0];
   $("hw-guess-title").textContent = `輪到 ${HW.names[p]} 作答`;
-  const best = c.hints.slice().sort((a, b) => c.topic.rank[a.idx] - c.topic.rank[b.idx]);
+  const best = c.hints.slice().sort((a, b) => c.topic.rankOf(a.idx) - c.topic.rankOf(b.idx));
   $("hw-guess-hints").replaceChildren(
     ...best.map((h) => scoreItem(Engine.words[h.idx], c.topic.pct(h.idx), h.ai ? "🎁" : null)),
   );
@@ -513,7 +626,7 @@ $("hw-guess-form").addEventListener("submit", (e) => {
   if (!raw) return;
   const idx = Engine.lookup(raw);
   if (idx < 0) {
-    $("hw-guess-msg").textContent = "呢個詞唔喺詞庫入面，換一個寫法或者另一個詞。";
+    $("hw-guess-msg").textContent = lookupError(raw, idx);
     return;
   }
   c.guesses.set(c.guessQueue.shift(), idx);
@@ -554,7 +667,7 @@ function revealGuesses() {
   near.classList.toggle("hidden", !over);
   if (over) {
     near.replaceChildren(
-      ...c.topic.order.slice(1, 11).map((i) => el("li", null, `${Engine.words[i]}　${fmtPct(c.topic.pct(i))}`)),
+      ...c.topic.near.slice(0, 10).map((i) => el("li", null, `${Engine.words[i]}　${fmtPct(c.topic.pct(i))}`)),
     );
   }
   const btn = $("hw-reveal-next");
@@ -606,6 +719,7 @@ Engine.load((p) => ($("load-bar").style.width = `${Math.round(p * 100)}%`))
   .then(() => {
     history.replaceState({ id: "menu" }, "");
     show("menu", { push: false });
+    Engine.loadExt(); // 背景載入擴充詞庫，唔阻住開始玩
   })
   .catch((err) => {
     $("loading").replaceChildren(el("p", "msg", `載入失敗：${err.message}。請重新整理頁面再試。`));

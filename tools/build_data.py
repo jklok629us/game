@@ -11,8 +11,10 @@
      跟節目規則：提示只可用名詞（專有名詞可以）；答案只可用一般名詞
   6. 為每個答案計算難度（易／中／難），前端派題時會平均分配
   7. 輸出到 web/data/：
-       vocab.json   詞表 + 別名 + 詞性
-       vectors.bin  int8 向量矩陣（row-major，N x dim）
+       vocab.json       核心詞表 + 別名 + 詞性（約 3 萬詞；排名／百分比只按核心詞計，保持分數標準一致）
+       vectors.bin      核心 int8 向量矩陣（row-major，N x dim）
+       vocab_ext.json   擴充詞表（香港用語、較少用的詞、單字；前端喺背景載入）
+       vectors_ext.bin  擴充詞向量
        answers.json [[答案 index, 難度 0易/1中/2難, 抽象 0/1], ...]
 
 前端只需要做 cosine similarity，不需要伺服器或 GPU。
@@ -223,7 +225,10 @@ def main():
     ap.add_argument("--spam-seeds", type=Path, default=ROOT / "data" / "spam_seeds.txt",
                     help="垃圾網頁種子詞；用嚟搵出並扣除垃圾方向")
     ap.add_argument("--spam-dims", type=int, default=3, help="扣除幾多個垃圾方向；0 = 唔扣")
-    ap.add_argument("--size", type=int, default=30000, help="詞庫大小（不計答案及額外詞）")
+    ap.add_argument("--size", type=int, default=30000, help="核心詞庫大小（不計答案及額外詞）")
+    ap.add_argument("--ext-size", type=int, default=40000, help="擴充詞庫大小（不計單字）")
+    ap.add_argument("--hk-words", type=Path, default=ROOT / "data" / "hk_words.txt", help="香港常用詞")
+    ap.add_argument("--aliases", type=Path, default=ROOT / "data" / "aliases.txt", help="口語 → 標準詞對照")
     ap.add_argument("--dim", type=int, default=128, help="PCA 降維後的維度；0 = 不降維")
     args = ap.parse_args()
 
@@ -295,6 +300,46 @@ def main():
         if len(words) >= limit:
             break
         add(simp)
+    core_n = len(words)
+
+    # ---- 擴充詞庫：香港常用詞 → jieba 其餘常用詞 → 所有單字（方便前端組合詞） ----
+    hk = [w for line in read_answers(args.hk_words) for w in line.split()] if args.hk_words.exists() else []
+    n_hk = 0
+    for trad in hk:
+        before = len(words)
+        add(t2s.convert(trad), trad)
+        n_hk += len(words) > before
+    limit = core_n + args.ext_size
+    for simp, _freq in dict_rows:
+        if len(words) >= limit:
+            break
+        add(simp)
+    n_single = 0
+    if isinstance(vecs, SpacyVectors):
+        han1 = re.compile(r"^[\u4e00-\u9fff]$")
+        strings = vecs.vocab.strings
+        for key in vecs.vectors.keys():
+            ch = strings[key]
+            if han1.match(ch):
+                before = len(words)
+                add(ch)
+                n_single += len(words) > before
+    print(f"  核心 {core_n} 詞；擴充 {len(words) - core_n} 詞（香港用語 {n_hk}、單字 {n_single}）", file=sys.stderr)
+
+    # 口語 → 標準詞（例如 曱甴 → 蟑螂）
+    n_alias = 0
+    if args.aliases.exists():
+        for line in read_answers(args.aliases):
+            parts = line.split()
+            if len(parts) != 2 or parts[0] in seen:
+                continue
+            k, target = parts
+            idx = seen.get(target, aliases.get(target, seen.get(s2hk.convert(t2s.convert(target)))))
+            if idx is None:
+                print(f"  [略過別名] 標準詞唔喺詞庫：{k} → {target}", file=sys.stderr)
+                continue
+            aliases[k] = idx
+            n_alias += 1
 
     overrides = ROOT / "data" / "noun_overrides.txt"
     force_noun = {t2s.convert(w) for w in read_answers(overrides)} if overrides.exists() else set()
@@ -324,7 +369,7 @@ def main():
                 groups.append((line[3:], cur))
             elif line and not line.startswith("#") and cur is not None:
                 cur.append(line)
-        mu = m.mean(axis=0, keepdims=True)
+        mu = m[:core_n].mean(axis=0, keepdims=True)
         dirs = []
         for name, ws in groups:
             seeds = [vecs.get(t2s.convert(w)) for w in ws]
@@ -340,8 +385,9 @@ def main():
             m /= np.linalg.norm(m, axis=1, keepdims=True)
 
     if args.dim and args.dim < m.shape[1]:
-        mean = m.mean(axis=0, keepdims=True)
-        _, _, vt = np.linalg.svd(m - mean, full_matrices=False)
+        # PCA 基底只用核心詞計，擴充詞投影到同一個空間
+        mean = m[:core_n].mean(axis=0, keepdims=True)
+        _, _, vt = np.linalg.svd(m[:core_n] - mean, full_matrices=False)
         m = (m - mean) @ vt[: args.dim].T
         m /= np.linalg.norm(m, axis=1, keepdims=True)
 
@@ -350,10 +396,11 @@ def main():
     q = np.clip(np.round(m * scale), -127, 127).astype(np.int8)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "vectors.bin").write_bytes(q.tobytes())
+    (args.out / "vectors.bin").write_bytes(q[:core_n].tobytes())
+    (args.out / "vectors_ext.bin").write_bytes(q[core_n:].tobytes())
 
     # 難度：用量化後的向量計，跟前端一致
-    mq = q.astype(np.float32)
+    mq = q[:core_n].astype(np.float32)
     mq /= np.linalg.norm(mq, axis=1, keepdims=True)
     freq = [jieba_freq.get(s_, 0) for s_ in simps]
     ease = answer_difficulty(mq, answer_idx, words, pos, freq)
@@ -362,11 +409,15 @@ def main():
     for t, name in enumerate("易中難"):
         sample = [words[i] for i, tt, _ in sorted(zip(answer_idx, tiers, ease), key=lambda x: -x[2]) if tt == t]
         print(f"  難度「{name}」{len(sample)} 個：{'、'.join(sample[:12])}…", file=sys.stderr)
+    core_alias = {k: v for k, v in aliases.items() if v < core_n}
+    ext_alias = {k: v for k, v in aliases.items() if v >= core_n}
+    dump = lambda obj: json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
     (args.out / "vocab.json").write_text(
-        json.dumps({"dim": int(q.shape[1]), "words": words, "aliases": aliases, "pos": pos}, ensure_ascii=False,
-                   separators=(",", ":")),
-        encoding="utf-8",
-    )
+        dump({"dim": int(q.shape[1]), "words": words[:core_n], "aliases": core_alias, "pos": pos[:core_n]}),
+        encoding="utf-8")
+    (args.out / "vocab_ext.json").write_text(
+        dump({"offset": core_n, "words": words[core_n:], "aliases": ext_alias, "pos": pos[core_n:]}),
+        encoding="utf-8")
     abstract = set(read_answers(args.abstract)) if args.abstract.exists() else set()
     missing = abstract - {words[i] for i in answer_idx}
     if missing:
@@ -379,10 +430,12 @@ def main():
           f"抽象詞 {sum(flags)} 個", file=sys.stderr)
 
     mb = os.path.getsize(args.out / "vectors.bin") / 1e6
+    mb_ext = os.path.getsize(args.out / "vectors_ext.bin") / 1e6
     print(f"詞性：一般名詞 {pos.count('n')}、專有名詞 {pos.count('p')}、其他 {pos.count('o')}；額外詞 {n_extra}",
           file=sys.stderr)
-    print(f"完成：詞庫 {len(words)} 詞、別名 {len(aliases)}、答案 {len(answer_idx)}、"
-          f"維度 {q.shape[1]}、vectors.bin {mb:.1f} MB", file=sys.stderr)
+    print(f"完成：核心 {core_n} 詞＋擴充 {len(words) - core_n} 詞、別名 {len(aliases)}（口語 {n_alias}）、"
+          f"答案 {len(answer_idx)}、維度 {q.shape[1]}、vectors.bin {mb:.1f} MB＋vectors_ext.bin {mb_ext:.1f} MB",
+          file=sys.stderr)
 
 
 if __name__ == "__main__":
